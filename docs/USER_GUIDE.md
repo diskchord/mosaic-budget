@@ -36,16 +36,26 @@ Names and ordering are shared across months. Month specificity controls whether 
 
 ## Sort incoming transactions
 
-The **to sort** button opens the inbox. On a phone, either:
+The **to sort** button opens the inbox. Check the control on the left of any transaction bubble to build a selection on either desktop or touch devices. On a computer:
 
-- drag a transaction bubble onto a category, or
-- tap the bubble and choose a category.
+- **Ctrl** (or **Cmd** on macOS) toggles individual bubbles.
+- **Shift** selects an inclusive range from the last selected bubble.
 
-The target category previews its new remaining amount before assignment. A manual assignment locks categorization against ordinary background rules.
+Drag a checked bubble onto a category to move the entire checked group. Dragging a bubble that is not checked moves only that bubble and leaves the existing selection unchanged. On a touch device, press and hold a bubble before dragging so the inbox can still scroll normally.
+
+For a keyboard-friendly alternative, check the bubbles and choose **Assign selected...**, then choose the destination category. Selecting a bubble normally still opens its transaction editor for individual assignment or splitting.
+
+The target category previews its new remaining amount before assignment. Group assignment is atomic: either every selected transaction is assigned or none are changed. After a successful assignment, **Undo** reverses the complete group together. A manual assignment locks categorization against ordinary background rules.
 
 ## Split a transaction
 
 Open a transaction and choose **Split**. Add each category and exact signed amount. The remaining indicator must reach zero before saving. Mosaic rejects duplicate categories and any split whose exact total differs from the transaction.
+
+## Edit several transactions
+
+Open **Transactions** and select from the left edge of each row. After the first selection, the selection controls remain visible and the action bar can select every loaded result, clear the group, or open **Edit selected...**. Shift-select chooses a range; Ctrl-select or Cmd-select toggles a row without opening it.
+
+The group editor can move single-category or unassigned transactions to one category, make them unassigned, change their review status, and include or exclude them from budget totals. Unchanged fields retain each transaction's individual value. Split transactions can still be updated together for review or budget status, but must be recategorized individually. Group updates are version-checked and atomic, so a conflict changes none of the selected transactions.
 
 ## Add cash or manual activity
 
@@ -71,11 +81,15 @@ To process transactions already in the inbox, open **Rules**, choose the month i
 
 A rule may reference a category that is not present in the month currently open, because it may be valid for other months. At runtime, Mosaic checks the transaction's own month. If the target is unavailable there, the rule leaves the transaction intact, flags it for review, and opens an operational incident instead of assigning it incorrectly.
 
-## Duplicate bank accounts
+## Name and deduplicate accounts
+
+Open **More → Accounts** and use the edit button to give a manual or synced account a familiar name. Account names are used throughout transaction and rule displays, remain scoped to the workspace, and are not overwritten by a later SimpleFIN synchronization.
 
 If the same bank account is imported through two SimpleFIN connections, open **More → Bank connections**, open the affected connection, and choose **Manage accounts**. Mark the redundant copy as **This is a duplicate account** and save it.
 
 Mosaic immediately removes that account's transactions from the inbox, transaction lists, and budget totals. Future observations from the duplicate feed remain in the protected source ledger but stay hidden and do not run rules. Clearing the duplicate setting restores transactions that Mosaic hid for this reason; transactions you excluded separately remain excluded.
+
+Duplicate accounts are omitted from the regular **More → Accounts** list. They remain visible with a muted **Duplicate** treatment inside their bank connection and its account manager, where the owner can rename them or clear the duplicate setting.
 
 ## Conflicts
 

@@ -233,6 +233,9 @@ def update_account(
         raise HTTPException(status_code=409, detail={"message": "Account conflict", "current": serialize_account(account)})
     if is_duplicate is not None and account.source_type != "simplefin":
         raise HTTPException(status_code=400, detail="Only SimpleFIN accounts can be marked as duplicates")
+    clean_name = name.strip() if name is not None else None
+    if name is not None and not clean_name:
+        raise HTTPException(status_code=400, detail="Account name cannot be blank")
 
     before = serialize_account(account)
     suppressed_count = 0
@@ -270,8 +273,8 @@ def update_account(
             )
             restored_count = int(result.rowcount or 0)
         account.is_duplicate = is_duplicate
-    if name is not None and name.strip():
-        account.name = name.strip()
+    if clean_name is not None:
+        account.name = clean_name
     if is_budget is not None:
         account.is_budget = is_budget
     if is_active is not None:

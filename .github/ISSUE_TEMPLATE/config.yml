@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/diskchord/mosaic-budget/security/advisories/new
+    about: Report security issues privately; do not post vulnerability details or financial data in a public issue.

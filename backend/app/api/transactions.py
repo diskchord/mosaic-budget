@@ -11,7 +11,11 @@ from sqlalchemy.orm import Session, selectinload
 from ..db import get_db
 from ..models import Account, Allocation, BudgetTransaction, Category, Section
 from ..schemas import (
+    AllocationInput,
     AllocationRequest,
+    BatchAllocationTransactionInput,
+    BatchAllocationRequest,
+    BatchTransactionUpdateRequest,
     DeleteTransactionRequest,
     ManualTransactionRequest,
     TransactionUpdateRequest,
@@ -62,6 +66,54 @@ def _transaction_for_user(
 
 def _conflict(transaction: BudgetTransaction, message: str = "This transaction changed on another device") -> None:
     raise HTTPException(status_code=409, detail={"message": message, "current": serialize_transaction(transaction)})
+
+
+def _batch_transactions_for_user(
+    db: Session,
+    transaction_inputs: list[BatchAllocationTransactionInput],
+    workspace_id: uuid.UUID,
+) -> list[BudgetTransaction]:
+    requested_ids = [item.id for item in transaction_inputs]
+    requested_versions = {item.id: item.version for item in transaction_inputs}
+    rows = db.scalars(
+        select(BudgetTransaction)
+        .where(
+            BudgetTransaction.workspace_id == workspace_id,
+            BudgetTransaction.id.in_(requested_ids),
+        )
+        .options(*_load_options())
+        .order_by(BudgetTransaction.id)
+        .with_for_update()
+    ).unique().all()
+    by_id = {transaction.id: transaction for transaction in rows}
+    if set(by_id) != set(requested_ids):
+        raise HTTPException(status_code=404, detail="One or more transactions were not found")
+
+    transactions = [by_id[transaction_id] for transaction_id in requested_ids]
+    if any(
+        transaction.suppressed_by_duplicate_account or transaction.account.is_duplicate
+        for transaction in transactions
+    ):
+        raise HTTPException(status_code=404, detail="One or more transactions were not found")
+
+    conflicts = [
+        {
+            "id": str(transaction.id),
+            "expected_version": requested_versions[transaction.id],
+            "current": serialize_transaction(transaction),
+        }
+        for transaction in transactions
+        if transaction.version != requested_versions[transaction.id]
+    ]
+    if conflicts:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "One or more transactions changed on another device",
+                "conflicts": conflicts,
+            },
+        )
+    return transactions
 
 
 def _validate_categories(
@@ -310,6 +362,168 @@ def set_allocations(
     )
     db.commit()
     return {"transaction": serialize_transaction(transaction)}
+
+
+@router.put("/batch")
+def set_batch_allocations(
+    payload: BatchAllocationRequest,
+    auth: AuthContext = Depends(require_write),
+    db: Session = Depends(get_db),
+) -> dict:
+    transactions = _batch_transactions_for_user(db, payload.transactions, auth.user.workspace_id)
+    if any(transaction.deleted_at is not None for transaction in transactions):
+        raise HTTPException(status_code=400, detail="Restore deleted transactions before categorizing them")
+    if any(transaction.excluded for transaction in transactions):
+        raise HTTPException(status_code=400, detail="Excluded transactions cannot be categorized")
+
+    clearing = payload.category_id is None
+    if clearing:
+        if any(not transaction.allocations for transaction in transactions):
+            raise HTTPException(status_code=400, detail="One or more transactions are already unassigned")
+    else:
+        if any(transaction.allocations for transaction in transactions):
+            raise HTTPException(status_code=400, detail="Group assignment accepts only unassigned transactions")
+        for effective_date in {transaction.effective_date for transaction in transactions}:
+            _validate_categories(
+                db,
+                auth.user.workspace_id,
+                {payload.category_id},
+                effective_date,
+                allow_existing=set(),
+            )
+
+    before_by_id = {transaction.id: serialize_transaction(transaction) for transaction in transactions}
+    for transaction in transactions:
+        allocations = (
+            []
+            if clearing
+            else [
+                AllocationInput(
+                    category_id=payload.category_id,
+                    amount=money_str(transaction.amount),
+                    memo="",
+                )
+            ]
+        )
+        _replace_allocations(db, transaction, allocations, manual_lock=True)
+        transaction.needs_review = False
+        transaction.version += 1
+
+    db.flush()
+    for transaction in transactions:
+        write_audit(
+            db,
+            workspace_id=auth.user.workspace_id,
+            actor_user_id=auth.user.id,
+            action="transaction.allocations.updated",
+            object_type="transaction",
+            object_id=transaction.id,
+            before=before_by_id[transaction.id],
+            after=serialize_transaction(transaction),
+            detail={"batch": True, "batch_size": len(transactions)},
+        )
+    db.commit()
+    return {"transactions": [serialize_transaction(transaction) for transaction in transactions]}
+
+
+@router.patch("/batch")
+def update_batch_transactions(
+    payload: BatchTransactionUpdateRequest,
+    auth: AuthContext = Depends(require_write),
+    db: Session = Depends(get_db),
+) -> dict:
+    transactions = _batch_transactions_for_user(db, payload.transactions, auth.user.workspace_id)
+    if any(transaction.deleted_at is not None for transaction in transactions):
+        raise HTTPException(status_code=400, detail="Restore deleted transactions before modifying them")
+
+    requested_fields = [
+        field
+        for field in ("category_id", "needs_review", "excluded")
+        if field in payload.model_fields_set
+    ]
+    category_supplied = "category_id" in payload.model_fields_set
+    review_supplied = "needs_review" in payload.model_fields_set
+    excluded_supplied = "excluded" in payload.model_fields_set
+
+    if category_supplied:
+        if any(len(transaction.allocations) > 1 for transaction in transactions):
+            raise HTTPException(status_code=400, detail="Split transactions must be edited individually")
+        if payload.category_id is not None:
+            for effective_date in sorted({transaction.effective_date for transaction in transactions}):
+                _validate_categories(
+                    db,
+                    auth.user.workspace_id,
+                    {payload.category_id},
+                    effective_date,
+                    allow_existing=set(),
+                )
+
+    changed: list[tuple[BudgetTransaction, dict]] = []
+    for transaction in transactions:
+        existing_allocation = transaction.allocations[0] if transaction.allocations else None
+        allocation_changed = category_supplied and (
+            (payload.category_id is None and existing_allocation is not None)
+            or (
+                payload.category_id is not None
+                and (existing_allocation is None or existing_allocation.category_id != payload.category_id)
+            )
+        )
+        desired_review = (
+            payload.needs_review
+            if review_supplied
+            else False
+            if category_supplied
+            else transaction.needs_review
+        )
+        desired_excluded = payload.excluded if excluded_supplied else transaction.excluded
+        if not (
+            allocation_changed
+            or desired_review != transaction.needs_review
+            or desired_excluded != transaction.excluded
+        ):
+            continue
+
+        before = serialize_transaction(transaction)
+        if allocation_changed:
+            allocations = (
+                []
+                if payload.category_id is None
+                else [
+                    AllocationInput(
+                        category_id=payload.category_id,
+                        amount=money_str(transaction.amount),
+                        memo=existing_allocation.memo if existing_allocation else "",
+                    )
+                ]
+            )
+            _replace_allocations(db, transaction, allocations, manual_lock=True)
+        transaction.needs_review = desired_review
+        transaction.excluded = desired_excluded
+        transaction.version += 1
+        changed.append((transaction, before))
+
+    db.flush()
+    for transaction, before in changed:
+        write_audit(
+            db,
+            workspace_id=auth.user.workspace_id,
+            actor_user_id=auth.user.id,
+            action="transaction.updated",
+            object_type="transaction",
+            object_id=transaction.id,
+            before=before,
+            after=serialize_transaction(transaction),
+            detail={
+                "batch": True,
+                "batch_size": len(transactions),
+                "fields": requested_fields,
+            },
+        )
+    db.commit()
+    return {
+        "transactions": [serialize_transaction(transaction) for transaction in transactions],
+        "updated_count": len(changed),
+    }
 
 
 @router.patch("/{transaction_id}")

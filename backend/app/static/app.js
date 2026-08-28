@@ -9,11 +9,20 @@ const state = {
   transactionSearch: '',
   transactionCategory: null,
   transactions: [],
+  selectedListTransactionIds: new Set(),
+  listSelectionVersions: new Map(),
+  listSelectionAnchorId: null,
+  bulkTransactionInFlight: false,
   rules: [],
   users: [],
   incidents: [],
   operations: null,
   trayOpen: false,
+  selectedTransactionIds: new Set(),
+  selectionAnchorId: null,
+  dragInProgress: false,
+  cancelBubbleDrag: null,
+  assignmentInFlight: false,
   modalOpen: false,
   formDirty: false,
   eventSource: null,
@@ -22,6 +31,7 @@ const state = {
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+const MAX_BULK_TRANSACTIONS = 200;
 
 const ICONS = {
   budget: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 19V9M10 19V4M16 19v-7M22 19H2"/></svg>',
@@ -45,6 +55,8 @@ const ICONS = {
   subscriptions: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16v12H4zM8 4h8M8 11h8M8 15h5"/></svg>',
   personal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M5 22a7 7 0 0 1 14 0"/></svg>',
   savings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 8h16v12H4zM7 8V5h10v3M8 13h8M12 10v6"/></svg>',
+  previous: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>',
+  next: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>',
   check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="m5 12 4 4L19 6"/></svg>',
   alert: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3 2 21h20zM12 9v5M12 18h.01"/></svg>',
 };
@@ -295,6 +307,8 @@ function updateNavigation() {
 }
 
 async function setView(view) {
+  if (state.trayOpen) closeTray({ restoreFocus: false });
+  if (view !== 'transactions') clearTransactionListSelection();
   state.view = view;
   if (view !== 'transactions') state.transactionCategory = null;
   updateNavigation();
@@ -399,7 +413,8 @@ function catalogCategoryById(id) {
   return { ...category, section };
 }
 
-function accountById(id) { return state.budget?.accounts?.find(account => account.id === id) || null; }
+function accountCatalog() { return state.budget?.account_catalog || state.budget?.accounts || []; }
+function accountById(id) { return accountCatalog().find(account => account.id === id) || null; }
 function transactionById(id) {
   return state.budget?.unassigned?.find(item => item.id === id) || state.transactions.find(item => item.id === id) || null;
 }
@@ -418,6 +433,7 @@ function renderBudget() {
       const activity = toUnits(category.activity);
       const remaining = toUnits(category.remaining);
       const used = section.is_income ? activity : -activity;
+      const progressAmount = section.is_income ? category.activity : category.remaining;
       const ratio = planned > 0n ? Math.max(0, Math.min(1.25, Number(used * 10000n / planned) / 10000)) : (used > 0n ? 1.25 : 0);
       const over = !section.is_income && remaining < 0n;
       return `<article class="category-row" data-category-id="${category.id}" data-section-id="${section.id}">
@@ -426,7 +442,7 @@ function renderBudget() {
           <div class="category-sub">${section.is_income ? `${money(category.activity)} received` : `${money(unitsToString(used))} used`}</div>
         </div>
         <button class="category-money budget-edit ${over ? 'over' : ''}" type="button" data-category-id="${category.id}" aria-label="Edit ${escapeHtml(category.name)} planned amount">
-          <b>${money(category.remaining)}</b><span>of ${money(category.planned)}</span>
+          <b>${money(progressAmount)}</b><span>of ${money(category.planned)}</span>
         </button>
         <button class="icon-button edit-category" data-category-id="${category.id}" type="button" aria-label="Edit ${escapeHtml(category.name)} category"><span data-icon="pencil"></span></button>
         <div class="progress-track" aria-hidden="true"><div class="progress-bar ${over ? 'over' : ''}" style="width:${Math.min(100, ratio * 100)}%"></div></div>
@@ -776,81 +792,229 @@ function openCategoryEditor(categoryId = null, sectionId = null) {
   });
 }
 
+function trayTransactions() {
+  return state.budget?.unassigned || [];
+}
+
+function selectedTrayTransactionIds() {
+  return trayTransactions()
+    .map(transaction => transaction.id)
+    .filter(id => state.selectedTransactionIds.has(id));
+}
+
+function reconcileBubbleSelection(rows = trayTransactions()) {
+  const visibleIds = new Set(rows.map(transaction => transaction.id));
+  for (const id of state.selectedTransactionIds) {
+    if (!visibleIds.has(id)) state.selectedTransactionIds.delete(id);
+  }
+  if (state.selectionAnchorId && !visibleIds.has(state.selectionAnchorId)) state.selectionAnchorId = null;
+}
+
+function syncBubbleSelection() {
+  const container = $('#transaction-bubbles');
+  $$('.tx-bubble', container || document).forEach(bubble => {
+    const selected = state.selectedTransactionIds.has(bubble.dataset.transactionId);
+    bubble.classList.toggle('is-selected', selected);
+    const checkbox = $('.tx-select', bubble);
+    if (checkbox) checkbox.checked = selected;
+  });
+  const count = selectedTrayTransactionIds().length;
+  container?.classList.toggle('selection-mode', count > 0);
+  $('#tray-selection-bar')?.classList.toggle('hidden', count === 0);
+  if ($('#tray-selection-count')) $('#tray-selection-count').textContent = `${count} selected`;
+  if ($('#tray-assign-selection')) $('#tray-assign-selection').disabled = count === 0 || state.assignmentInFlight;
+}
+
+function clearBubbleSelection() {
+  state.selectedTransactionIds.clear();
+  state.selectionAnchorId = null;
+  syncBubbleSelection();
+}
+
+function toggleBubbleSelection(transactionId, selected = null) {
+  const shouldSelect = selected ?? !state.selectedTransactionIds.has(transactionId);
+  if (shouldSelect) state.selectedTransactionIds.add(transactionId);
+  else state.selectedTransactionIds.delete(transactionId);
+  state.selectionAnchorId = transactionId;
+  syncBubbleSelection();
+}
+
+function selectBubbleRange(transactionId, additive = false) {
+  const ids = trayTransactions().map(transaction => transaction.id);
+  const targetIndex = ids.indexOf(transactionId);
+  const anchorIndex = ids.indexOf(state.selectionAnchorId);
+  if (targetIndex < 0) return;
+  if (anchorIndex < 0) {
+    if (!additive) state.selectedTransactionIds.clear();
+    state.selectedTransactionIds.add(transactionId);
+    state.selectionAnchorId = transactionId;
+    syncBubbleSelection();
+    return;
+  }
+  if (!additive) state.selectedTransactionIds.clear();
+  const start = Math.min(anchorIndex, targetIndex);
+  const end = Math.max(anchorIndex, targetIndex);
+  ids.slice(start, end + 1).forEach(id => state.selectedTransactionIds.add(id));
+  syncBubbleSelection();
+}
+
 function renderTray() {
   const container = $('#transaction-bubbles');
   if (!container || !state.budget) return;
-  const rows = state.budget.unassigned || [];
+  const focusedBubble = document.activeElement?.closest?.('.tx-bubble');
+  const focusedId = focusedBubble?.dataset.transactionId || null;
+  const focusedControl = document.activeElement?.classList.contains('tx-select') ? 'select' : 'content';
+  state.cancelBubbleDrag?.();
+  const rows = trayTransactions();
+  reconcileBubbleSelection(rows);
   if (!rows.length) {
     container.innerHTML = '<div class="empty-state" style="grid-column:1/-1"><strong>Everything is sorted</strong>New imported transactions will appear here automatically.</div>';
+    syncBubbleSelection();
     return;
   }
   container.innerHTML = rows.map(transaction => {
     const inflow = toUnits(transaction.amount) > 0n;
-    return `<button class="tx-bubble" type="button" data-transaction-id="${transaction.id}" aria-label="Assign ${escapeHtml(transaction.payee)}, ${escapeHtml(money(transaction.amount))}">
-      <strong>${escapeHtml(transaction.payee || transaction.imported_description || 'Transaction')}</strong>
-      <span class="amount ${inflow ? 'inflow' : ''}">${money(transaction.amount, { plus: true })}</span>
-      <small>${escapeHtml(transaction.account_name)} · ${escapeHtml(formatDate(transaction.effective_date))}</small>
-      ${transaction.pending ? '<span class="pending-badge">Pending</span>' : ''}
-    </button>`;
+    const label = transaction.payee || transaction.imported_description || 'Transaction';
+    const description = `${label}, ${money(transaction.amount)}, ${formatDate(transaction.effective_date)}`;
+    return `<article class="tx-bubble" data-transaction-id="${transaction.id}">
+      <label class="tx-select-control" title="Select ${escapeHtml(label)}">
+        <input class="tx-select" type="checkbox" aria-label="Select ${escapeHtml(description)}">
+        <span class="tx-select-mark" aria-hidden="true"></span>
+      </label>
+      <button class="tx-bubble-content" type="button" aria-label="Open ${escapeHtml(description)}">
+        <strong>${escapeHtml(label)}</strong>
+        <span class="amount ${inflow ? 'inflow' : ''}">${money(transaction.amount, { plus: true })}</span>
+        <small>${escapeHtml(transaction.account_name)} · ${escapeHtml(formatDate(transaction.effective_date))}</small>
+        ${transaction.pending ? '<span class="pending-badge">Pending</span>' : ''}
+      </button>
+    </article>`;
   }).join('');
-  $$('.tx-bubble', container).forEach(bubble => {
-    bubble.addEventListener('click', event => {
-      if (bubble.dataset.dragged === 'true') { bubble.dataset.dragged = 'false'; return; }
-      openTransactionEditor(bubble.dataset.transactionId);
-    });
-  });
+  syncBubbleSelection();
+  if (focusedId && state.trayOpen) {
+    const nextBubble = $$('.tx-bubble', container).find(bubble => bubble.dataset.transactionId === focusedId);
+    $(`.${focusedControl === 'select' ? 'tx-select' : 'tx-bubble-content'}`, nextBubble || container)?.focus({ preventScroll: true });
+  }
 }
 
 function openTray() {
   if (!state.budget?.unassigned?.length) return;
   state.trayOpen = true;
   renderTray();
-  $('#transaction-tray').classList.add('open');
-  $('#transaction-tray').setAttribute('aria-hidden', 'false');
+  const tray = $('#transaction-tray');
+  tray.removeAttribute('inert');
+  tray.classList.add('open');
+  tray.setAttribute('aria-hidden', 'false');
+  $('#inbox-button').setAttribute('aria-expanded', 'true');
   $('#scrim').classList.remove('hidden');
   document.body.classList.add('sheet-open');
+  setTimeout(() => $('.tx-bubble-content', tray)?.focus({ preventScroll: true }), 30);
 }
 
-function closeTray() {
+function closeTray({ restoreFocus = true } = {}) {
+  state.cancelBubbleDrag?.();
   state.trayOpen = false;
-  $('#transaction-tray').classList.remove('open', 'dragging');
-  $('#transaction-tray').setAttribute('aria-hidden', 'true');
+  clearBubbleSelection();
+  const tray = $('#transaction-tray');
+  tray.classList.remove('open', 'dragging');
+  tray.setAttribute('aria-hidden', 'true');
+  tray.setAttribute('inert', '');
+  $('#inbox-button').setAttribute('aria-expanded', 'false');
   $('#scrim').classList.add('hidden');
-  document.body.classList.remove('sheet-open');
+  document.body.classList.remove('sheet-open', 'dragging');
+  if (restoreFocus && !$('#inbox-button').classList.contains('hidden')) $('#inbox-button').focus({ preventScroll: true });
 }
 
-async function assignTransaction(transactionId, categoryId) {
-  const transaction = transactionById(transactionId);
-  const category = categoryById(categoryId);
-  if (!transaction || !category) return;
-  const localBody = {
-    version: transaction.version,
-    allocations: [{ category_id: category.id, amount: transaction.amount, memo: '' }],
-  };
+async function undoTransactionAssignment(transactions) {
+  if (!transactions.length || state.assignmentInFlight) return;
+  state.assignmentInFlight = true;
   try {
-    const result = await withConflict(
-      body => api(`/api/transactions/${transaction.id}/allocations`, { method: 'PUT', body }),
-      localBody,
-      'category assignment',
-    );
-    if (!result) return;
-    closeTray();
-    toast(`${transaction.payee} assigned to ${category.name}`, 'default', {
-      label: 'Undo',
-      run: async () => {
-        try {
-          await api(`/api/transactions/${transaction.id}/allocations`, {
-            method: 'PUT',
-            body: { version: result.transaction.version, allocations: [] },
-          });
-          await refreshCurrentView();
-        } catch (error) { toast(error.message, 'error'); }
+    await api('/api/transactions/batch', {
+      method: 'PUT',
+      body: {
+        category_id: null,
+        transactions: transactions.map(transaction => ({ id: transaction.id, version: transaction.version })),
       },
     });
+    toast(transactions.length === 1 ? 'Assignment undone' : `${transactions.length} assignments undone`);
     await refreshCurrentView();
   } catch (error) {
-    if (error.status !== 401) toast(error.message, 'error');
+    if (error.status !== 401) toast(`Could not undo: ${error.message}`, 'error');
+    if (error instanceof ConflictError) await refreshCurrentView();
+  } finally {
+    state.assignmentInFlight = false;
+    syncBubbleSelection();
   }
+}
+
+async function assignTransactions(transactionIds, categoryId) {
+  if (state.assignmentInFlight) return false;
+  const transactions = transactionIds.map(transactionById);
+  const category = categoryById(categoryId);
+  if (!transactions.length || transactions.some(transaction => !transaction) || !category) {
+    toast('Those transactions are no longer available to assign.', 'error');
+    return false;
+  }
+  state.assignmentInFlight = true;
+  $('#transaction-tray')?.setAttribute('aria-busy', 'true');
+  syncBubbleSelection();
+  try {
+    const result = await api('/api/transactions/batch', {
+      method: 'PUT',
+      body: {
+        category_id: category.id,
+        transactions: transactions.map(transaction => ({ id: transaction.id, version: transaction.version })),
+      },
+    });
+    closeTray({ restoreFocus: false });
+    const message = transactions.length === 1
+      ? `${transactions[0].payee || 'Transaction'} assigned to ${category.name}`
+      : `${transactions.length} transactions assigned to ${category.name}`;
+    await refreshCurrentView();
+    $('#app-view')?.focus({ preventScroll: true });
+    state.assignmentInFlight = false;
+    $('#transaction-tray')?.removeAttribute('aria-busy');
+    syncBubbleSelection();
+    toast(message, 'default', {
+      label: 'Undo',
+      run: () => undoTransactionAssignment(result.transactions || []),
+    });
+    return true;
+  } catch (error) {
+    if (error.status !== 401) toast(error.message, 'error');
+    if (error instanceof ConflictError) await refreshCurrentView();
+    return false;
+  } finally {
+    state.assignmentInFlight = false;
+    $('#transaction-tray')?.removeAttribute('aria-busy');
+    syncBubbleSelection();
+  }
+}
+
+function openSelectedAssignment() {
+  const transactionIds = selectedTrayTransactionIds();
+  if (!transactionIds.length) return;
+  if (!categoryOptions()) {
+    toast('Add a budget category before assigning transactions.', 'error');
+    return;
+  }
+  openModal({
+    title: `Assign ${transactionIds.length} transaction${transactionIds.length === 1 ? '' : 's'}`,
+    body: `<form id="group-assignment-form" class="form-grid">
+      <label>Budget category<select id="group-assignment-category" required>${categoryOptions()}</select></label>
+    </form>`,
+    footer: '<button class="button modal-cancel" type="button">Cancel</button><button class="button button--primary modal-save" type="button">Assign selected</button>',
+    onMount(root) {
+      $('.modal-cancel', root).addEventListener('click', closeModal);
+      const save = async () => {
+        const categoryId = $('#group-assignment-category', root).value;
+        closeModal();
+        const assigned = await assignTransactions(transactionIds, categoryId);
+        if (!assigned && state.trayOpen) $('#tray-assign-selection')?.focus({ preventScroll: true });
+      };
+      $('.modal-save', root).addEventListener('click', save);
+      $('#group-assignment-form', root).addEventListener('submit', event => { event.preventDefault(); save(); });
+    },
+  });
 }
 
 function installBubbleDrag() {
@@ -860,13 +1024,22 @@ function installBubbleDrag() {
   let drag = null;
 
   const clean = () => {
-    if (!drag) return;
-    drag.ghost?.remove();
-    drag.bubble?.releasePointerCapture?.(drag.pointerId);
-    drag.bubble?.classList.remove('is-dragging');
+    const current = drag;
+    drag = null;
+    if (!current) return;
+    clearTimeout(current.holdTimer);
+    cancelAnimationFrame(current.scrollFrame);
+    current.ghost?.remove();
+    (current.bubbles || []).forEach(bubble => bubble.classList.remove('is-dragging'));
     $$('.category-row.drop-target').forEach(row => row.classList.remove('drop-target'));
     $('#transaction-tray').classList.remove('dragging');
-    drag = null;
+    document.body.classList.remove('dragging');
+    state.dragInProgress = false;
+    state.cancelBubbleDrag = null;
+    if (current.pointerId !== null && current.handle?.hasPointerCapture?.(current.pointerId)) {
+      try { current.handle.releasePointerCapture(current.pointerId); } catch { /* capture may already be gone */ }
+    }
+    if (current.active) setTimeout(() => { delete current.bubble.dataset.dragged; }, 0);
   };
 
   const moveGhost = (x, y) => {
@@ -874,60 +1047,212 @@ function installBubbleDrag() {
     drag.ghost.style.transform = `translate3d(${x - drag.offsetX}px, ${y - drag.offsetY}px, 0)`;
   };
 
-  container.addEventListener('pointerdown', event => {
-    const bubble = event.target.closest('.tx-bubble');
-    if (!bubble || event.button !== 0) return;
+  const categoryAtPoint = (x, y) => {
+    for (const element of document.elementsFromPoint(x, y)) {
+      const category = element.closest?.('.category-row[data-category-id]');
+      if (category) return category;
+    }
+    return null;
+  };
+
+  const updateDropTarget = (x, y) => {
+    if (!drag?.active) return;
+    drag.target?.classList.remove('drop-target');
+    drag.target = categoryAtPoint(x, y);
+    drag.target?.classList.add('drop-target');
+  };
+
+  const runAutoScroll = () => {
+    if (!drag?.active || !drag.scrollDirection) {
+      if (drag) drag.scrollFrame = null;
+      return;
+    }
+    window.scrollBy({ top: drag.scrollDirection, behavior: 'auto' });
+    updateDropTarget(drag.lastX, drag.lastY);
+    drag.scrollFrame = requestAnimationFrame(runAutoScroll);
+  };
+
+  const updateAutoScroll = (x, y) => {
+    if (!drag?.active) return;
+    drag.lastX = x;
+    drag.lastY = y;
+    const edge = 72;
+    drag.scrollDirection = y < edge ? -14 : y > window.innerHeight - edge ? 14 : 0;
+    if (drag.scrollDirection && drag.scrollFrame === null) drag.scrollFrame = requestAnimationFrame(runAutoScroll);
+  };
+
+  const activateDrag = (x, y) => {
+    if (!drag || drag.active || state.assignmentInFlight) return;
+    const sourceId = drag.bubble.dataset.transactionId;
+    const transactionIds = state.selectedTransactionIds.has(sourceId) ? selectedTrayTransactionIds() : [sourceId];
+    const transactions = transactionIds.map(transactionById).filter(Boolean);
+    if (!transactions.length || transactions.length !== transactionIds.length) { clean(); return; }
+    drag.active = true;
+    drag.transactionIds = transactionIds;
+    drag.bubble.dataset.dragged = 'true';
+    if (drag.pointerId !== null) {
+      try {
+        document.body.setPointerCapture(drag.pointerId);
+        drag.handle = document.body;
+      } catch { /* window listeners still track the active pointer */ }
+    }
+    drag.bubbles = $$('.tx-bubble', container).filter(bubble => transactionIds.includes(bubble.dataset.transactionId));
+    drag.bubbles.forEach(bubble => bubble.classList.add('is-dragging'));
+    const total = transactions.reduce((sum, transaction) => sum + toUnits(transaction.amount), 0n);
+    const first = transactions[0];
+    drag.ghost = document.createElement('div');
+    drag.ghost.className = 'drag-ghost';
+    drag.ghost.setAttribute('aria-hidden', 'true');
+    drag.ghost.style.width = `${Math.min(210, Math.max(160, drag.rect.width))}px`;
+    drag.ghost.innerHTML = `<strong>${escapeHtml(first.payee || first.imported_description || 'Transaction')}</strong>
+      <span class="amount ${total > 0n ? 'inflow' : ''}">${money(unitsToString(total), { plus: true })}</span>
+      <small>${transactions.length === 1 ? `${escapeHtml(first.account_name)} · ${escapeHtml(formatDate(first.effective_date))}` : `${transactions.length} transactions moving together`}</small>
+      ${transactions.length > 1 ? `<span class="drag-count">${transactions.length}</span>` : ''}`;
+    document.body.append(drag.ghost);
+    state.dragInProgress = true;
+    state.cancelBubbleDrag = clean;
+    document.body.classList.add('dragging');
+    $('#transaction-tray').classList.add('dragging');
+    moveGhost(x, y);
+    updateDropTarget(x, y);
+    if (navigator.vibrate && drag.touchId !== null) navigator.vibrate(18);
+  };
+
+  const startDrag = ({ bubble, handle, x, y, pointerId = null, touchId = null }) => {
+    clean();
     const rect = bubble.getBoundingClientRect();
     drag = {
       bubble,
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      offsetX: Math.min(rect.width - 12, Math.max(12, event.clientX - rect.left)),
-      offsetY: Math.min(rect.height - 12, Math.max(12, event.clientY - rect.top)),
+      handle,
+      pointerId,
+      touchId,
+      startX: x,
+      startY: y,
+      offsetX: Math.min(rect.width - 12, Math.max(12, x - rect.left)),
+      offsetY: Math.min(rect.height - 12, Math.max(12, y - rect.top)),
+      rect,
       active: false,
       target: null,
       ghost: null,
+      bubbles: [],
+      holdTimer: null,
+      scrollFrame: null,
+      scrollDirection: 0,
+      lastX: x,
+      lastY: y,
+      transactionIds: [],
     };
-    bubble.setPointerCapture?.(event.pointerId);
+    state.cancelBubbleDrag = clean;
+  };
+
+  const finish = async (x, y) => {
+    if (!drag) return;
+    if (drag.active) updateDropTarget(x, y);
+    const wasActive = drag.active;
+    const transactionIds = [...drag.transactionIds];
+    const categoryId = drag.target?.dataset.categoryId || null;
+    clean();
+    if (wasActive && categoryId) await assignTransactions(transactionIds, categoryId);
+  };
+
+  container.addEventListener('click', event => {
+    const bubble = event.target.closest('.tx-bubble');
+    if (bubble?.dataset.dragged === 'true') {
+      event.preventDefault();
+      event.stopPropagation();
+      delete bubble.dataset.dragged;
+      return;
+    }
+    const selectionControl = event.target.closest('.tx-select-control');
+    if (selectionControl) {
+      event.preventDefault();
+      event.stopPropagation();
+      const transactionId = selectionControl.closest('.tx-bubble').dataset.transactionId;
+      if (event.shiftKey) selectBubbleRange(transactionId, event.ctrlKey || event.metaKey);
+      else toggleBubbleSelection(transactionId);
+      return;
+    }
+    const content = event.target.closest('.tx-bubble-content');
+    if (!content) return;
+    const transactionId = content.closest('.tx-bubble').dataset.transactionId;
+    if (event.shiftKey) {
+      event.preventDefault();
+      selectBubbleRange(transactionId, event.ctrlKey || event.metaKey);
+    } else if (event.ctrlKey || event.metaKey) {
+      event.preventDefault();
+      toggleBubbleSelection(transactionId);
+    } else {
+      openTransactionEditor(transactionId);
+    }
   });
 
-  container.addEventListener('pointermove', event => {
-    if (!drag || drag.pointerId !== event.pointerId) return;
+  container.addEventListener('pointerdown', event => {
+    const bubble = event.target.closest('.tx-bubble');
+    if (!bubble || event.target.closest('.tx-select-control') || event.button !== 0 || event.isPrimary === false || event.pointerType === 'touch' || state.assignmentInFlight) return;
+    startDrag({ bubble, handle: bubble, x: event.clientX, y: event.clientY, pointerId: event.pointerId });
+  });
+
+  window.addEventListener('pointermove', event => {
+    if (!drag || drag.pointerId !== event.pointerId || event.pointerType === 'touch') return;
+    if (event.buttons === 0) { clean(); return; }
     const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
     if (!drag.active && distance < 9) return;
     event.preventDefault();
-    if (!drag.active) {
-      drag.active = true;
-      drag.bubble.dataset.dragged = 'true';
-      drag.bubble.classList.add('is-dragging');
-      drag.ghost = drag.bubble.cloneNode(true);
-      drag.ghost.className = 'drag-ghost';
-      drag.ghost.style.width = `${drag.bubble.getBoundingClientRect().width}px`;
-      document.body.append(drag.ghost);
-      $('#transaction-tray').classList.add('dragging');
-    }
+    activateDrag(event.clientX, event.clientY);
     moveGhost(event.clientX, event.clientY);
-    $$('.category-row.drop-target').forEach(row => row.classList.remove('drop-target'));
-    const hit = document.elementFromPoint(event.clientX, event.clientY)?.closest('.category-row');
-    drag.target = hit || null;
-    hit?.classList.add('drop-target');
-
-    const edge = 72;
-    if (event.clientY < edge) window.scrollBy({ top: -14, behavior: 'auto' });
-    else if (event.clientY > window.innerHeight - edge) window.scrollBy({ top: 14, behavior: 'auto' });
+    updateDropTarget(event.clientX, event.clientY);
+    updateAutoScroll(event.clientX, event.clientY);
   }, { passive: false });
 
-  const finish = async event => {
+  window.addEventListener('pointerup', event => {
     if (!drag || drag.pointerId !== event.pointerId) return;
-    const transactionId = drag.bubble.dataset.transactionId;
-    const categoryId = drag.target?.dataset.categoryId;
-    const wasActive = drag.active;
-    clean();
-    if (wasActive && categoryId) await assignTransaction(transactionId, categoryId);
-  };
-  container.addEventListener('pointerup', finish);
-  container.addEventListener('pointercancel', clean);
+    finish(event.clientX, event.clientY);
+  });
+  window.addEventListener('pointercancel', event => {
+    if (drag?.pointerId === event.pointerId) clean();
+  });
+  container.addEventListener('touchstart', event => {
+    if (event.touches.length !== 1) { clean(); return; }
+    if (state.assignmentInFlight) return;
+    const bubble = event.target.closest('.tx-bubble');
+    if (!bubble || event.target.closest('.tx-select-control')) return;
+    const touch = event.changedTouches[0];
+    startDrag({
+      bubble,
+      handle: bubble,
+      x: touch.clientX,
+      y: touch.clientY,
+      touchId: touch.identifier,
+    });
+    drag.holdTimer = setTimeout(() => activateDrag(touch.clientX, touch.clientY), 340);
+  }, { passive: true });
+
+  container.addEventListener('touchmove', event => {
+    if (!drag || drag.touchId === null) return;
+    const touch = Array.from(event.touches).find(item => item.identifier === drag.touchId);
+    if (!touch) return;
+    const distance = Math.hypot(touch.clientX - drag.startX, touch.clientY - drag.startY);
+    if (!drag.active && distance > 8) { clean(); return; }
+    if (!drag.active) return;
+    event.preventDefault();
+    moveGhost(touch.clientX, touch.clientY);
+    updateDropTarget(touch.clientX, touch.clientY);
+    updateAutoScroll(touch.clientX, touch.clientY);
+  }, { passive: false });
+
+  container.addEventListener('touchend', event => {
+    if (!drag || drag.touchId === null) return;
+    const touch = Array.from(event.changedTouches).find(item => item.identifier === drag.touchId);
+    if (!touch) return;
+    if (drag.active) event.preventDefault();
+    finish(touch.clientX, touch.clientY);
+  }, { passive: false });
+  container.addEventListener('touchcancel', clean);
+  container.addEventListener('contextmenu', event => {
+    if (drag?.active && event.target.closest('.tx-bubble')) event.preventDefault();
+  });
+  window.addEventListener('blur', clean);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) clean(); });
 }
 
 function transactionCategoryText(transaction) {
@@ -940,17 +1265,118 @@ function transactionCategoryText(transaction) {
   return `Split across ${transaction.allocations.length} categories`;
 }
 
+function selectedListTransactions() {
+  return state.transactions.filter(transaction => state.selectedListTransactionIds.has(transaction.id));
+}
+
+function reconcileTransactionListSelection() {
+  const visibleTransactions = new Map(state.transactions.filter(transaction => !transaction.deleted_at).map(transaction => [transaction.id, transaction]));
+  let changedCount = 0;
+  for (const id of state.selectedListTransactionIds) {
+    const transaction = visibleTransactions.get(id);
+    if (!transaction || state.listSelectionVersions.get(id) !== transaction.version) {
+      state.selectedListTransactionIds.delete(id);
+      state.listSelectionVersions.delete(id);
+      if (transaction) changedCount += 1;
+    }
+  }
+  if (state.listSelectionAnchorId && !state.selectedListTransactionIds.has(state.listSelectionAnchorId)) state.listSelectionAnchorId = null;
+  if (changedCount) toast(`${changedCount} selected transaction${changedCount === 1 ? '' : 's'} changed elsewhere and ${changedCount === 1 ? 'was' : 'were'} deselected.`);
+}
+
+function syncTransactionListSelection() {
+  const container = $('.transaction-list', $('#app-view'));
+  $$('.transaction-card', container || document).forEach(card => {
+    const selected = state.selectedListTransactionIds.has(card.dataset.transactionId);
+    card.classList.toggle('is-selected', selected);
+    const checkbox = $('.transaction-list-select', card);
+    if (checkbox) checkbox.checked = selected;
+  });
+  const count = selectedListTransactions().length;
+  container?.classList.toggle('selection-mode', count > 0);
+  $('.transaction-selection-bar', $('#app-view'))?.classList.toggle('hidden', count === 0);
+  if ($('#transaction-selection-count', $('#app-view'))) $('#transaction-selection-count', $('#app-view')).textContent = `${count} selected`;
+  if ($('.edit-selected-transactions', $('#app-view'))) $('.edit-selected-transactions', $('#app-view')).disabled = count === 0 || state.bulkTransactionInFlight;
+}
+
+function clearTransactionListSelection() {
+  state.selectedListTransactionIds.clear();
+  state.listSelectionVersions.clear();
+  state.listSelectionAnchorId = null;
+  syncTransactionListSelection();
+}
+
+function toggleTransactionListSelection(transactionId, selected = null) {
+  const transaction = state.transactions.find(item => item.id === transactionId);
+  if (!transaction || transaction.deleted_at) return;
+  const shouldSelect = selected ?? !state.selectedListTransactionIds.has(transactionId);
+  if (shouldSelect) {
+    if (state.selectedListTransactionIds.size >= MAX_BULK_TRANSACTIONS) { toast(`You can edit up to ${MAX_BULK_TRANSACTIONS} transactions at once.`, 'error'); return; }
+    state.selectedListTransactionIds.add(transactionId);
+    state.listSelectionVersions.set(transactionId, transaction.version);
+  } else {
+    state.selectedListTransactionIds.delete(transactionId);
+    state.listSelectionVersions.delete(transactionId);
+  }
+  state.listSelectionAnchorId = transactionId;
+  syncTransactionListSelection();
+}
+
+function selectTransactionListRange(transactionId, additive = false) {
+  const ids = state.transactions.filter(transaction => !transaction.deleted_at).map(transaction => transaction.id);
+  const targetIndex = ids.indexOf(transactionId);
+  const anchorIndex = ids.indexOf(state.listSelectionAnchorId);
+  if (targetIndex < 0) return;
+  if (anchorIndex < 0) {
+    if (!additive) { state.selectedListTransactionIds.clear(); state.listSelectionVersions.clear(); }
+    state.selectedListTransactionIds.add(transactionId);
+    state.listSelectionVersions.set(transactionId, state.transactions.find(transaction => transaction.id === transactionId).version);
+    state.listSelectionAnchorId = transactionId;
+    syncTransactionListSelection();
+    return;
+  }
+  if (!additive) { state.selectedListTransactionIds.clear(); state.listSelectionVersions.clear(); }
+  const range = ids.slice(Math.min(anchorIndex, targetIndex), Math.max(anchorIndex, targetIndex) + 1);
+  let limitReached = false;
+  range.forEach(id => {
+    if (!state.selectedListTransactionIds.has(id) && state.selectedListTransactionIds.size >= MAX_BULK_TRANSACTIONS) { limitReached = true; return; }
+    const transaction = state.transactions.find(item => item.id === id);
+    state.selectedListTransactionIds.add(id); state.listSelectionVersions.set(id, transaction.version);
+  });
+  if (limitReached) toast(`Only the first ${MAX_BULK_TRANSACTIONS} transactions were selected.`, 'error');
+  syncTransactionListSelection();
+}
+
+function selectAllVisibleTransactions() {
+  const visible = state.transactions.filter(transaction => !transaction.deleted_at);
+  state.selectedListTransactionIds.clear();
+  state.listSelectionVersions.clear();
+  visible.slice(0, MAX_BULK_TRANSACTIONS).forEach(transaction => {
+    state.selectedListTransactionIds.add(transaction.id);
+    state.listSelectionVersions.set(transaction.id, transaction.version);
+  });
+  if (visible.length > MAX_BULK_TRANSACTIONS) toast(`Only the first ${MAX_BULK_TRANSACTIONS} visible transactions were selected.`, 'error');
+  state.listSelectionAnchorId = state.transactions.find(transaction => !transaction.deleted_at)?.id || null;
+  syncTransactionListSelection();
+}
+
 function transactionCard(transaction) {
   const inflow = toUnits(transaction.amount) > 0n;
   const symbol = (transaction.payee || '?').trim().slice(0, 1).toUpperCase();
+  const label = transaction.payee || transaction.imported_description || 'Transaction';
+  const description = `${label}, ${money(transaction.amount)}, ${formatDate(transaction.effective_date)}`;
   const badges = [
     transaction.pending ? '<span class="pending-badge">Pending</span>' : '',
     transaction.needs_review ? '<span class="review-badge">Review</span>' : '',
+    transaction.excluded ? '<span class="excluded-badge">Excluded</span>' : '',
   ].join('');
-  return `<article class="transaction-card" tabindex="0" role="button" data-transaction-id="${transaction.id}">
-    <div class="transaction-symbol ${inflow ? 'inflow' : ''}">${escapeHtml(symbol)}</div>
-    <div class="transaction-copy"><strong>${escapeHtml(transaction.payee || transaction.imported_description || 'Transaction')} ${badges}</strong><small>${escapeHtml(formatDate(transaction.effective_date))} · ${escapeHtml(transaction.account_name)} · ${escapeHtml(transactionCategoryText(transaction))}</small></div>
-    <div class="transaction-amount ${inflow ? 'inflow' : ''}">${money(transaction.amount, { plus: true })}<small>${transaction.source_kind === 'manual' ? 'Manual' : 'Synced'}</small></div>
+  return `<article class="transaction-card ${transaction.deleted_at ? 'is-deleted' : ''}" data-transaction-id="${transaction.id}">
+    ${transaction.deleted_at ? '' : `<label class="transaction-list-select-control" title="Select ${escapeHtml(label)}"><input class="transaction-list-select" type="checkbox" aria-label="Select ${escapeHtml(description)}"><span class="transaction-list-select-mark" aria-hidden="true"></span></label>`}
+    <button class="transaction-card-content" type="button" aria-label="Open ${escapeHtml(description)}">
+      <div class="transaction-symbol ${inflow ? 'inflow' : ''}">${escapeHtml(symbol)}</div>
+      <div class="transaction-copy"><strong>${escapeHtml(label)} ${badges}</strong><small>${escapeHtml(formatDate(transaction.effective_date))} · ${escapeHtml(transaction.account_name)} · ${escapeHtml(transactionCategoryText(transaction))}</small></div>
+      <div class="transaction-amount ${inflow ? 'inflow' : ''}">${money(transaction.amount, { plus: true })}<small>${transaction.source_kind === 'manual' ? 'Manual' : 'Synced'}</small></div>
+    </button>
   </article>`;
 }
 
@@ -960,34 +1386,98 @@ async function renderTransactions() {
   if (state.transactionCategory) params.set('category_id', state.transactionCategory);
   const result = await api(`/api/transactions?${params}`);
   state.transactions = result.transactions;
+  reconcileTransactionListSelection();
   const category = state.transactionCategory ? categoryById(state.transactionCategory) : null;
   const title = category ? category.name : 'Transactions';
   const filters = [
     ['active', 'All'], ['unassigned', 'Unassigned'], ['assigned', 'Assigned'], ['review', 'Needs review'], ['pending', 'Pending'], ['excluded', 'Excluded'], ['trash', 'Trash'],
   ];
   $('#app-view').innerHTML = `
-    <header class="view-header"><div><h1>${escapeHtml(title)}</h1><p>${category ? `${escapeHtml(category.section.name)} · ${monthLabel(state.month)}` : 'Search, review, split, or recategorize every entry.'}</p></div><div class="view-actions"><button class="button button--primary add-manual" type="button">+ Add transaction</button></div></header>
+    <header class="view-header"><div><h1>${escapeHtml(title)}</h1><p>${category ? `${escapeHtml(category.section.name)} · ${monthLabel(state.month)} · Select from the left edge to edit a group.` : 'Search, review, or recategorize entries. Select from the left edge to edit a group.'}</p></div><div class="view-actions"><button class="button button--primary add-manual" type="button">+ Add transaction</button></div></header>
     <div class="toolbar">
       <label class="search-field"><span data-icon="search"></span><input id="transaction-search" type="search" placeholder="Search payee, source text, or note" value="${escapeHtml(state.transactionSearch)}"></label>
       <div class="filter-row">${filters.map(([value, label]) => `<button class="filter-chip ${state.transactionStatus === value ? 'active' : ''}" type="button" data-filter="${value}">${label}</button>`).join('')}${category ? '<button class="filter-chip clear-category" type="button">Clear category filter ×</button>' : ''}</div>
+    </div>
+    <div class="transaction-selection-bar hidden" role="region" aria-label="Selected transaction actions">
+      <strong id="transaction-selection-count" role="status" aria-live="polite" aria-atomic="true">0 selected</strong>
+      <div class="button-row"><button class="button button--ghost select-all-transactions" type="button">Select all</button><button class="button button--ghost clear-transaction-selection" type="button">Clear</button><button class="button button--primary edit-selected-transactions" type="button">Edit selected…</button></div>
     </div>
     <div class="transaction-list">${state.transactions.map(transactionCard).join('') || '<div class="empty-state"><strong>No matching transactions</strong>Try another filter or add a manual cash transaction.</div>'}</div>`;
   hydrateIcons($('#app-view'));
   $('.add-manual', $('#app-view')).addEventListener('click', openManualTransaction);
   $$('.filter-chip[data-filter]', $('#app-view')).forEach(button => button.addEventListener('click', async () => {
+    clearTransactionListSelection();
     state.transactionStatus = button.dataset.filter;
     await renderTransactions();
   }));
-  $('.clear-category', $('#app-view'))?.addEventListener('click', async () => { state.transactionCategory = null; await renderTransactions(); });
+  $('.clear-category', $('#app-view'))?.addEventListener('click', async () => { clearTransactionListSelection(); state.transactionCategory = null; await renderTransactions(); });
+  $('.select-all-transactions', $('#app-view')).addEventListener('click', selectAllVisibleTransactions);
+  $('.clear-transaction-selection', $('#app-view')).addEventListener('click', clearTransactionListSelection);
+  $('.edit-selected-transactions', $('#app-view')).addEventListener('click', openBulkTransactionEditor);
   let searchTimer;
   $('#transaction-search', $('#app-view')).addEventListener('input', event => {
     clearTimeout(searchTimer);
-    searchTimer = setTimeout(async () => { state.transactionSearch = event.target.value.trim(); await renderTransactions(); }, 260);
+    searchTimer = setTimeout(async () => { clearTransactionListSelection(); state.transactionSearch = event.target.value.trim(); await renderTransactions(); }, 260);
   });
-  $$('.transaction-card', $('#app-view')).forEach(card => {
-    const open = () => openTransactionEditor(card.dataset.transactionId);
-    card.addEventListener('click', open);
-    card.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); } });
+  $$('.transaction-list-select-control', $('#app-view')).forEach(control => control.addEventListener('click', event => {
+    event.preventDefault(); event.stopPropagation();
+    const transactionId = control.closest('.transaction-card').dataset.transactionId;
+    if (event.shiftKey) selectTransactionListRange(transactionId, event.ctrlKey || event.metaKey);
+    else toggleTransactionListSelection(transactionId);
+  }));
+  $$('.transaction-card-content', $('#app-view')).forEach(content => content.addEventListener('click', event => {
+    const transactionId = content.closest('.transaction-card').dataset.transactionId;
+    if (event.shiftKey) { event.preventDefault(); selectTransactionListRange(transactionId, event.ctrlKey || event.metaKey); }
+    else if (event.ctrlKey || event.metaKey) { event.preventDefault(); toggleTransactionListSelection(transactionId); }
+    else openTransactionEditor(transactionId);
+  }));
+  syncTransactionListSelection();
+}
+
+function openBulkTransactionEditor() {
+  const transactions = selectedListTransactions();
+  if (!transactions.length) return;
+  openModal({
+    title: `Edit ${transactions.length} transaction${transactions.length === 1 ? '' : 's'}`,
+    body: `<form id="bulk-transaction-form" class="form-grid">
+      <label class="full">Category<select id="bulk-transaction-category"><option value="__keep">Keep each current category</option><option value="__unassigned">Make unassigned</option>${categoryOptions()}</select></label>
+      <label>Review status<select id="bulk-transaction-review"><option value="keep">No change</option><option value="true">Needs review</option><option value="false">Reviewed</option></select></label>
+      <label>Budget status<select id="bulk-transaction-excluded"><option value="keep">No change</option><option value="false">Include in budget</option><option value="true">Exclude from budget</option></select></label>
+      <p class="muted full">Choosing a category replaces an existing single category on every selected transaction. Split transactions must be recategorized individually. Fields set to “No change” keep their individual values.</p>
+    </form>`,
+    footer: '<button class="button modal-cancel" type="button">Cancel</button><button class="button button--primary apply-bulk-transactions" type="button">Apply changes</button>',
+    onMount(root) {
+      $('.modal-cancel', root).addEventListener('click', closeModal);
+      $$('select', root).forEach(select => select.addEventListener('change', () => { state.formDirty = true; }));
+      const save = async () => {
+        const body = { transactions: transactions.map(transaction => ({ id: transaction.id, version: transaction.version })) };
+        const category = $('#bulk-transaction-category', root).value;
+        const review = $('#bulk-transaction-review', root).value;
+        const excluded = $('#bulk-transaction-excluded', root).value;
+        if (category !== '__keep') body.category_id = category === '__unassigned' ? null : category;
+        if (review !== 'keep') body.needs_review = review === 'true';
+        if (excluded !== 'keep') body.excluded = excluded === 'true';
+        if (Object.keys(body).length === 1) { toast('Choose at least one change.', 'error'); return; }
+        const button = $('.apply-bulk-transactions', root); setButtonBusy(button, true, 'Applying…');
+        state.bulkTransactionInFlight = true; syncTransactionListSelection();
+        try {
+          const result = await api('/api/transactions/batch', { method: 'PATCH', body });
+          state.formDirty = false; closeModal(); clearTransactionListSelection();
+          toast(`${result.transactions.length} transaction${result.transactions.length === 1 ? '' : 's'} updated`);
+          await refreshCurrentView();
+        } catch (error) {
+          if (error instanceof ConflictError) {
+            state.formDirty = false; closeModal(); clearTransactionListSelection();
+            await refreshCurrentView();
+            toast('Some selected transactions changed elsewhere. Review them and try again.', 'error');
+          } else toast(error.message, 'error');
+        } finally {
+          state.bulkTransactionInFlight = false; setButtonBusy(button, false); syncTransactionListSelection();
+        }
+      };
+      $('.apply-bulk-transactions', root).addEventListener('click', save);
+      $('#bulk-transaction-form', root).addEventListener('submit', event => { event.preventDefault(); save(); });
+    },
   });
 }
 
@@ -1223,7 +1713,11 @@ function ruleConditionSummary(condition) {
     const joiner = condition.combinator === 'any' ? ' OR ' : condition.combinator === 'none' ? ' NOR ' : ' AND ';
     return condition.children.map(ruleConditionSummary).join(joiner);
   }
-  const value = Array.isArray(condition.value) ? condition.value.join(' and ') : condition.value;
+  const rawValues = Array.isArray(condition.value) ? condition.value : [condition.value];
+  const displayValues = condition.field === 'account_id'
+    ? rawValues.map(value => accountById(String(value ?? ''))?.name || 'Unavailable account')
+    : rawValues;
+  const value = Array.isArray(condition.value) ? displayValues.join(' and ') : displayValues[0];
   return `${RULE_FIELDS[condition.field] || condition.field} ${RULE_OPERATORS[condition.operator] || condition.operator}${['is_true','is_false'].includes(condition.operator) ? '' : ` “${value ?? ''}”`}`;
 }
 
@@ -1298,11 +1792,16 @@ function conditionValueMarkup(condition) {
   const operator = condition.operator;
   if (['is_true','is_false'].includes(operator)) return '<span class="condition-value muted">No additional value</span>';
   if (field === 'account_id') {
+    const accounts = accountCatalog();
+    const optionMarkup = selected => accounts.map(account => {
+      const qualifier = account.is_duplicate ? ' — duplicate' : account.is_active ? '' : ' — inactive';
+      return `<option value="${account.id}" ${selected.includes(account.id) ? 'selected' : ''}>${escapeHtml(account.name + qualifier)}</option>`;
+    }).join('');
     if (['one_of','not_one_of'].includes(operator)) {
       const selected = Array.isArray(condition.value) ? condition.value : [condition.value];
-      return `<label class="condition-value">Accounts<select class="condition-value-input" multiple size="${Math.min(4, state.budget.accounts.length)}">${state.budget.accounts.map(account => `<option value="${account.id}" ${selected.includes(account.id) ? 'selected' : ''}>${escapeHtml(account.name)}</option>`).join('')}</select></label>`;
+      return `<label class="condition-value">Accounts<select class="condition-value-input" multiple size="${Math.max(1, Math.min(4, accounts.length))}">${optionMarkup(selected)}</select></label>`;
     }
-    return `<label class="condition-value">Account<select class="condition-value-input">${state.budget.accounts.map(account => `<option value="${account.id}" ${condition.value === account.id ? 'selected' : ''}>${escapeHtml(account.name)}</option>`).join('')}</select></label>`;
+    return `<label class="condition-value">Account<select class="condition-value-input">${optionMarkup([condition.value])}</select></label>`;
   }
   const isDate = field === 'date';
   const inputType = isDate ? 'date' : 'text';
@@ -1529,6 +2028,18 @@ async function renderMore() {
   }
   const themes = state.me.themes || Object.keys(THEME_META);
   const channelLabels = [state.me.notification_channels.smtp ? 'SMTP' : '', state.me.notification_channels.ntfy ? 'ntfy' : '', state.me.notification_channels.external_heartbeat ? 'external heartbeat' : ''].filter(Boolean);
+  const allAccounts = accountCatalog();
+  const duplicateAccountCount = allAccounts.filter(account => account.is_duplicate).length;
+  const accountCards = allAccounts.filter(account => !account.is_duplicate).map(account => {
+    const status = `${account.is_budget ? 'On budget' : 'Off budget'}${account.is_active ? '' : ' · Inactive'}`;
+    return `<div class="connection-card" data-account-id="${account.id}"><div class="connection-top"><div><strong>${escapeHtml(account.name)}</strong><small>${escapeHtml(account.source_type === 'manual' ? 'Manual account' : 'SimpleFIN account')} · ${escapeHtml(status)}</small></div><div class="account-card-actions"><b>${money(account.balance)}</b>${admin ? `<button class="icon-button edit-account-name" type="button" aria-label="Rename ${escapeHtml(account.name)}"><span data-icon="pencil"></span></button>` : ''}</div></div></div>`;
+  }).join('');
+  const duplicateAccountNote = duplicateAccountCount
+    ? ` ${duplicateAccountCount} duplicate account${duplicateAccountCount === 1 ? ' is' : 's are'} hidden here and ${admin ? 'can be managed' : 'remain visible'} inside the relevant bank connection.`
+    : '';
+  const emptyAccounts = duplicateAccountCount
+    ? `<div class="empty-state"><strong>No regular accounts shown</strong>${duplicateAccountCount} duplicate account${duplicateAccountCount === 1 ? ' is' : 's are'} ${admin ? 'available to manage' : 'still visible'} from the relevant bank connection.</div>`
+    : '<div class="empty-state"><strong>No accounts yet</strong>Connect a bank or add a manual transaction after an account is available.</div>';
   $('#app-view').innerHTML = `<header class="view-header"><div><h1>More</h1><p>Appearance, bank connections, people, and system reliability.</p></div></header>
     <div class="settings-grid">
       <section class="settings-card"><header><div><h2>${escapeHtml(state.me.user.display_name)}</h2><p>${escapeHtml(state.me.user.email)}${admin ? ' · Owner' : ''}</p></div><span class="avatar-button profile-avatar" aria-hidden="true">${escapeHtml(initials(state.me.user.display_name))}</span></header><div class="button-row"><button class="button button--soft sessions-button" type="button">Signed-in devices</button><button class="button logout-button" type="button">Sign out</button></div></section>
@@ -1538,7 +2049,7 @@ async function renderMore() {
       <section class="settings-card"><header><div><h2>Bank connections</h2><p>SimpleFIN imports continue in the background; opening this page does not trigger a bank request.</p></div>${admin ? '<button class="button button--primary add-connection" type="button">+ Connect</button>' : ''}</header>
         <div class="connection-list">${connections.map(connection => `<div class="connection-card" data-connection-id="${connection.id}"><div class="connection-top"><div><strong>${escapeHtml(connection.name)}</strong><small>Every ${connection.sync_interval_minutes / 60} hours · Next ${escapeHtml(relativeTime(connection.next_sync_at))}</small></div><button class="icon-button connection-details" type="button">›</button></div><div class="health-line"><span class="status-dot"></span>${connectionHealthMarkup(connection)}</div>${connection.last_error_message ? `<p class="danger">${escapeHtml(connection.last_error_message)}</p>` : ''}</div>`).join('') || '<div class="empty-state"><strong>No bank connected</strong>Manual and cash budgeting still work. The owner can add SimpleFIN here.</div>'}</div>
       </section>
-      <section class="settings-card"><header><div><h2>Accounts</h2><p>Balances shown are the latest values retained by Mosaic.</p></div></header>${state.budget.accounts.map(account => `<div class="connection-card"><div class="connection-top"><div><strong>${escapeHtml(account.name)}</strong><small>${escapeHtml(account.source_type === 'manual' ? 'Manual account' : 'SimpleFIN account')} · ${account.is_budget ? 'On budget' : 'Off budget'}</small></div><b>${money(account.balance)}</b></div></div>`).join('')}</section>
+      <section class="settings-card"><header><div><h2>Accounts</h2><p>Balances shown are the latest values retained by Mosaic.${admin ? ' Use edit to give any account a familiar name.' : ''}${escapeHtml(duplicateAccountNote)}</p></div></header>${accountCards || emptyAccounts}</section>
       ${admin ? `<section class="settings-card"><header><div><h2>People</h2><p>Multiple devices can be active at once. Conflicting edits require an explicit choice.</p></div><button class="button button--soft add-user" type="button">+ User</button></header><div class="user-list">${state.users.map(user => `<div class="user-row" data-user-id="${user.id}"><div><strong>${escapeHtml(user.display_name)} ${user.is_admin ? '<span class="pill">Owner</span>' : ''}</strong><small>${escapeHtml(user.email)} · ${user.is_active ? 'Active' : 'Disabled'}</small></div><button class="icon-button edit-user" type="button">›</button></div>`).join('')}</div></section>
       <section class="settings-card"><header><div><h2>Alerts</h2><p>${channelLabels.length ? `Delivery configured through ${escapeHtml(channelLabels.join(' and '))}.` : 'No external alert channel is currently enabled.'}</p></div><button class="button button--soft test-notifications" type="button">Send test</button></header><div class="incident-list">${state.incidents.map(incident => `<div class="incident-row"><div class="incident-top"><div><strong class="${incident.severity === 'critical' ? 'danger' : incident.severity === 'warning' ? 'warning' : ''}">${escapeHtml(incident.title)}</strong><small>${escapeHtml(relativeTime(incident.last_seen_at))} · Seen ${incident.occurrence_count} time${incident.occurrence_count === 1 ? '' : 's'}</small></div>${incident.acknowledged_at ? '<span class="pill">Acknowledged</span>' : `<button class="button button--ghost acknowledge-incident" data-incident-id="${incident.id}" type="button">Acknowledge</button>`}</div><p>${escapeHtml(incident.message)}</p></div>`).join('') || '<div class="empty-state"><strong>No open incidents</strong>Synchronization and background checks have not reported an unresolved problem.</div>'}</div></section>
       <section class="settings-card"><header><div><h2>Reliability</h2><p>Worker, synchronization, and verified backup status.</p></div></header><div class="health-line"><span class="status-dot"></span><strong>${system.healthy ? 'All monitored systems healthy' : 'Attention required'}</strong></div><div class="health-line">Worker: ${state.operations.worker.healthy ? 'healthy' : 'stale'} · heartbeat ${escapeHtml(relativeTime(state.operations.worker.heartbeat_at))}</div><div class="health-line">Backup: ${state.operations.backup.verified_at ? `verified ${escapeHtml(relativeTime(state.operations.backup.verified_at))}` : 'not yet verified'}</div><div class="health-line">Sync: ${escapeHtml(system.synchronization)} · Backup: ${escapeHtml(system.backup)}</div></section>` : ''}
@@ -1551,6 +2062,7 @@ async function renderMore() {
   $('.logout-button', $('#app-view')).addEventListener('click', logout);
   $('.add-connection', $('#app-view'))?.addEventListener('click', openConnectionSetup);
   $$('.connection-details', $('#app-view')).forEach(button => button.addEventListener('click', () => openConnectionDetails(connections.find(item => item.id === button.closest('.connection-card').dataset.connectionId))));
+  $$('.edit-account-name', $('#app-view')).forEach(button => button.addEventListener('click', () => openAccountNameEditor(accountById(button.closest('.connection-card').dataset.accountId))));
   $('.add-user', $('#app-view'))?.addEventListener('click', () => openUserEditor());
   $$('.edit-user', $('#app-view')).forEach(button => button.addEventListener('click', () => openUserEditor(state.users.find(user => user.id === button.closest('.user-row').dataset.userId))));
   $$('.acknowledge-incident', $('#app-view')).forEach(button => button.addEventListener('click', async () => {
@@ -1559,6 +2071,37 @@ async function renderMore() {
   $('.test-notifications', $('#app-view'))?.addEventListener('click', async event => {
     setButtonBusy(event.currentTarget, true, 'Queueing…');
     try { await api('/api/admin/notifications/test', { method: 'POST' }); toast('Test alert queued for the background delivery worker'); } catch (error) { toast(error.message, 'error'); } finally { setButtonBusy(event.currentTarget, false); }
+  });
+}
+
+function openAccountNameEditor(account) {
+  if (!account) { toast('That account is no longer available.', 'error'); return; }
+  openModal({
+    title: 'Name account',
+    body: `<form id="account-name-form" class="form-grid"><label>Account name<input id="account-display-name" value="${escapeHtml(account.name)}" required maxlength="255" autocomplete="off"></label><p class="muted">This name is used in transactions, rules, and account lists. Bank synchronization will not overwrite it.</p></form>`,
+    footer: '<button class="button modal-cancel" type="button">Cancel</button><button class="button button--primary save-account-name" type="button">Save name</button>',
+    onMount(root) {
+      $('.modal-cancel', root).addEventListener('click', closeModal);
+      $('#account-display-name', root).addEventListener('input', () => { state.formDirty = true; });
+      const save = async () => {
+        const name = $('#account-display-name', root).value.trim();
+        if (!name) { toast('Enter an account name.', 'error'); return; }
+        const button = $('.save-account-name', root); setButtonBusy(button, true, 'Saving…');
+        try {
+          const result = await withConflict(
+            body => api(`/api/connections/accounts/${account.id}`, { method: 'PATCH', body }),
+            { version: account.version, name },
+            'account name',
+          );
+          if (!result) return;
+          Object.assign(account, result.account);
+          state.formDirty = false; closeModal(); toast('Account name saved');
+          await refreshCurrentView();
+        } catch (error) { toast(error.message, 'error'); } finally { setButtonBusy(button, false); }
+      };
+      $('.save-account-name', root).addEventListener('click', save);
+      $('#account-name-form', root).addEventListener('submit', event => { event.preventDefault(); save(); });
+    },
   });
 }
 
@@ -1614,7 +2157,7 @@ async function openConnectionDetails(connection) {
     className: 'modal--wide',
     body: `<div class="connection-card"><div class="connection-top"><div><strong>${connectionHealthMarkup(connection)}</strong><small>Next scheduled ${escapeHtml(relativeTime(connection.next_sync_at))}</small></div></div><div class="health-line">Last attempt: ${escapeHtml(relativeTime(connection.last_attempt_at))}</div><div class="health-line">Last success: ${escapeHtml(relativeTime(connection.last_success_at))}</div>${connection.last_error_message ? `<p class="danger">${escapeHtml(connection.last_error_message)}</p>` : ''}</div>
       <div class="form-section"><div class="button-row">${admin && connection.connected ? `<button class="button button--soft retry-connection" type="button">Queue retry</button><button class="button toggle-connection" type="button">${connection.enabled ? 'Pause automatic sync' : 'Resume automatic sync'}</button>` : ''}${admin && accounts.length ? '<button class="button button--soft manage-accounts" type="button">Manage accounts</button>' : ''}</div></div>
-      <div class="form-section"><strong>Accounts</strong>${accounts.map(account => `<div class="connection-card"><div class="connection-top"><div><strong>${escapeHtml(account.name)} ${account.is_duplicate ? '<span class="pill">Duplicate</span>' : ''}</strong><small>${account.is_duplicate ? 'Transactions hidden' : (account.is_budget ? 'Included in budget' : 'Off budget')} · ${escapeHtml(account.currency)}</small></div><b>${money(account.balance)}</b></div></div>`).join('') || '<p class="muted">No accounts have been imported yet.</p>'}</div>
+      <div class="form-section"><strong>Accounts</strong>${accounts.map(account => `<div class="connection-card account-source-card ${account.is_duplicate ? 'is-duplicate-account' : ''}"><div class="connection-top"><div><strong>${escapeHtml(account.name)} ${account.is_duplicate ? '<span class="pill duplicate-account-badge">Duplicate</span>' : ''}</strong><small>${account.is_duplicate ? 'Transactions hidden' : (account.is_budget ? 'Included in budget' : 'Off budget')} · ${escapeHtml(account.currency)}</small></div><b>${money(account.balance)}</b></div></div>`).join('') || '<p class="muted">No accounts have been imported yet.</p>'}</div>
       <div class="form-section"><strong>Recent synchronization runs</strong>${runs.slice(0,10).map(run => `<div class="health-line"><span class="status-dot"></span>${escapeHtml(formatDate(run.started_at))} · ${escapeHtml(run.status)} · ${run.transactions_new} new / ${run.transactions_changed} changed${run.error_message ? ` · ${escapeHtml(run.error_message)}` : ''}</div>`).join('') || '<p class="muted">The first run has not started yet.</p>'}</div>
       ${admin && connection.connected ? '<div class="form-section"><button class="button button--danger disconnect-connection" type="button">Disconnect and destroy credential</button></div>' : ''}`,
     footer: '<button class="button modal-cancel" type="button">Close</button>',
@@ -1639,12 +2182,14 @@ async function openConnectionDetails(connection) {
 function openAccountManager(connection, accounts) {
   openModal({
     title: `Accounts in ${connection.name}`,
-    body: `<div class="account-editor-list">${accounts.map(account => `<div class="connection-card" data-account-id="${account.id}"><label>Name<input class="account-name" value="${escapeHtml(account.name)}"></label><label><span><input class="account-duplicate" type="checkbox" style="width:auto;min-height:auto" ${account.is_duplicate ? 'checked' : ''}> This is a duplicate account</span><small class="duplicate-account-help">${account.is_duplicate ? 'Imported source history is retained, but its transactions are hidden and excluded from the budget.' : 'Mark this only when the same bank account is already imported through another connection.'}</small></label><div class="button-row"><label><span><input class="account-budget" type="checkbox" style="width:auto;min-height:auto" ${account.is_budget ? 'checked' : ''} ${account.is_duplicate ? 'disabled' : ''}> Include in budget</span></label><label><span><input class="account-active" type="checkbox" style="width:auto;min-height:auto" ${account.is_active ? 'checked' : ''} ${account.is_duplicate ? 'disabled' : ''}> Active</span></label></div><button class="button button--soft save-account" type="button">Save account</button></div>`).join('')}</div>`,
+    body: `<div class="account-editor-list">${accounts.map(account => `<div class="connection-card account-editor-card ${account.is_duplicate ? 'is-duplicate-account' : ''}" data-account-id="${account.id}"><label><span class="account-name-label">Name <span class="pill duplicate-account-badge ${account.is_duplicate ? '' : 'hidden'}">Duplicate</span></span><input class="account-name" value="${escapeHtml(account.name)}" required maxlength="255"></label><label><span><input class="account-duplicate" type="checkbox" style="width:auto;min-height:auto" ${account.is_duplicate ? 'checked' : ''}> This is a duplicate account</span><small class="duplicate-account-help">${account.is_duplicate ? 'Imported source history is retained, but its transactions are hidden and excluded from the budget.' : 'Mark this only when the same bank account is already imported through another connection.'}</small></label><div class="button-row"><label><span><input class="account-budget" type="checkbox" style="width:auto;min-height:auto" ${account.is_budget ? 'checked' : ''} ${account.is_duplicate ? 'disabled' : ''}> Include in budget</span></label><label><span><input class="account-active" type="checkbox" style="width:auto;min-height:auto" ${account.is_active ? 'checked' : ''} ${account.is_duplicate ? 'disabled' : ''}> Active</span></label></div><button class="button button--soft save-account" type="button">Save account</button></div>`).join('')}</div>`,
     footer: '<button class="button modal-cancel" type="button">Close</button>',
     onMount(root) {
       $('.modal-cancel', root).addEventListener('click', closeModal);
       $$('.account-duplicate', root).forEach(input => input.addEventListener('change', () => {
         const card = input.closest('.connection-card');
+        card.classList.toggle('is-duplicate-account', input.checked);
+        $('.duplicate-account-badge', card).classList.toggle('hidden', !input.checked);
         $('.account-budget', card).disabled = input.checked;
         $('.account-active', card).disabled = input.checked;
         $('.duplicate-account-help', card).textContent = input.checked
@@ -1653,9 +2198,12 @@ function openAccountManager(connection, accounts) {
       }));
       $$('.save-account', root).forEach(button => button.addEventListener('click', async () => {
         const card = button.closest('.connection-card'); const account = accounts.find(item => item.id === card.dataset.accountId);
+        const nameInput = $('.account-name', card);
+        const name = nameInput.value.trim();
+        if (!name) { toast('Enter an account name.', 'error'); nameInput.focus(); return; }
         setButtonBusy(button, true, 'Saving…');
         try {
-          const result = await withConflict(body => api(`/api/connections/accounts/${account.id}`, { method: 'PATCH', body }), { version: account.version, name: $('.account-name', card).value.trim(), is_budget: $('.account-budget', card).checked, is_active: $('.account-active', card).checked, is_duplicate: $('.account-duplicate', card).checked }, 'account');
+          const result = await withConflict(body => api(`/api/connections/accounts/${account.id}`, { method: 'PATCH', body }), { version: account.version, name, is_budget: $('.account-budget', card).checked, is_active: $('.account-active', card).checked, is_duplicate: $('.account-duplicate', card).checked }, 'account');
           if (result) { Object.assign(account, result.account); toast(account.is_duplicate ? 'Duplicate account transactions hidden' : 'Account saved'); await refreshCurrentView(); }
         } catch (error) { toast(error.message, 'error'); } finally { setButtonBusy(button, false); }
       }));
@@ -1732,6 +2280,8 @@ function openMonthPicker() {
       const choose = async () => {
         const value = $('#month-picker', root).value;
         if (!/^\d{4}-\d{2}$/.test(value)) return;
+        closeTray({ restoreFocus: false });
+        clearTransactionListSelection();
         state.month = value; closeModal(); await loadBudget(); await renderCurrentView({ skipBudgetLoad: true });
       };
       $('.choose-month', root).addEventListener('click', choose);
@@ -1746,10 +2296,14 @@ function connectEvents() {
   state.eventSource = source;
   source.addEventListener('change', () => {
     clearTimeout(state.eventReloadTimer);
-    state.eventReloadTimer = setTimeout(async () => {
-      if (state.formDirty) return;
+    const reload = async () => {
+      if (state.formDirty || state.dragInProgress || state.assignmentInFlight || state.bulkTransactionInFlight) {
+        state.eventReloadTimer = setTimeout(reload, 650);
+        return;
+      }
       try { await refreshCurrentView(); } catch { /* ordinary API handler reports meaningful failures */ }
-    }, 650);
+    };
+    state.eventReloadTimer = setTimeout(reload, 650);
   });
   source.addEventListener('tick', () => syncPill());
   source.onerror = () => {
@@ -1776,12 +2330,30 @@ async function initialize() {
   $('#brand-button').addEventListener('click', () => setView('budget'));
   $('#avatar-button').addEventListener('click', () => setView('more'));
   $('#sync-status').addEventListener('click', () => setView('more'));
-  $('#month-prev').addEventListener('click', async () => { state.month = addMonths(state.month, -1); await loadBudget(); await renderCurrentView({ skipBudgetLoad: true }); });
-  $('#month-next').addEventListener('click', async () => { state.month = addMonths(state.month, 1); await loadBudget(); await renderCurrentView({ skipBudgetLoad: true }); });
+  $('#month-prev').addEventListener('click', async () => { closeTray({ restoreFocus: false }); clearTransactionListSelection(); state.month = addMonths(state.month, -1); await loadBudget(); await renderCurrentView({ skipBudgetLoad: true }); });
+  $('#month-next').addEventListener('click', async () => { closeTray({ restoreFocus: false }); clearTransactionListSelection(); state.month = addMonths(state.month, 1); await loadBudget(); await renderCurrentView({ skipBudgetLoad: true }); });
   $('#month-label').addEventListener('click', openMonthPicker);
   $('#inbox-button').addEventListener('click', openTray);
-  $('#tray-close').addEventListener('click', closeTray);
-  $('#scrim').addEventListener('click', closeTray);
+  $('#tray-close').addEventListener('click', () => closeTray());
+  $('#scrim').addEventListener('click', () => closeTray());
+  $('#tray-clear-selection').addEventListener('click', clearBubbleSelection);
+  $('#tray-assign-selection').addEventListener('click', openSelectedAssignment);
+  document.addEventListener('keydown', event => {
+    if (event.key !== 'Escape' || state.modalOpen) return;
+    if (state.cancelBubbleDrag) {
+      event.preventDefault();
+      state.cancelBubbleDrag();
+    } else if (selectedTrayTransactionIds().length) {
+      event.preventDefault();
+      clearBubbleSelection();
+    } else if (selectedListTransactions().length) {
+      event.preventDefault();
+      clearTransactionListSelection();
+    } else if (state.trayOpen) {
+      event.preventDefault();
+      closeTray();
+    }
+  });
 
   $('#login-form').addEventListener('submit', async event => {
     event.preventDefault();

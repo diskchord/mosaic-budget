@@ -417,15 +417,12 @@ def get_budget_state(db: Session, workspace_id: uuid.UUID, month: date) -> dict[
         .limit(200)
     ).all()
 
-    accounts = db.scalars(
+    account_catalog = db.scalars(
         select(Account)
-        .where(
-            Account.workspace_id == workspace_id,
-            Account.is_active.is_(True),
-            Account.is_duplicate.is_(False),
-        )
+        .where(Account.workspace_id == workspace_id)
         .order_by(Account.source_type, Account.name)
     ).all()
+    accounts = [account for account in account_catalog if account.is_active and not account.is_duplicate]
 
     connections = db.scalars(
         select(SimpleFinConnection)
@@ -454,6 +451,7 @@ def get_budget_state(db: Session, workspace_id: uuid.UUID, month: date) -> dict[
         "category_catalog": category_catalog,
         "unassigned": [serialize_transaction(transaction) for transaction in unassigned],
         "accounts": [serialize_account(account) for account in accounts],
+        "account_catalog": [serialize_account(account) for account in account_catalog],
         "connections": [
             {
                 "id": str(connection.id),

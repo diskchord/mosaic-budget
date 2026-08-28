@@ -4,7 +4,7 @@ from datetime import date
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
 
 class LoginRequest(BaseModel):
@@ -90,6 +90,51 @@ class AllocationInput(BaseModel):
 class AllocationRequest(BaseModel):
     version: int = Field(ge=1)
     allocations: list[AllocationInput] = Field(default_factory=list, max_length=100)
+
+
+class BatchAllocationTransactionInput(BaseModel):
+    id: UUID
+    version: int = Field(ge=1)
+
+
+class BatchTransactionRequest(BaseModel):
+    transactions: list[BatchAllocationTransactionInput] = Field(min_length=1, max_length=200)
+
+    @field_validator("transactions")
+    @classmethod
+    def transactions_must_be_unique(
+        cls,
+        transactions: list[BatchAllocationTransactionInput],
+    ) -> list[BatchAllocationTransactionInput]:
+        transaction_ids = [transaction.id for transaction in transactions]
+        if len(transaction_ids) != len(set(transaction_ids)):
+            raise ValueError("Include each transaction only once")
+        return transactions
+
+
+class BatchAllocationRequest(BatchTransactionRequest):
+    category_id: UUID | None
+
+
+class BatchTransactionUpdateRequest(BatchTransactionRequest):
+    category_id: UUID | None = None
+    needs_review: bool | None = None
+    excluded: bool | None = None
+
+    @model_validator(mode="after")
+    def at_least_one_change_is_required(self) -> "BatchTransactionUpdateRequest":
+        change_fields = {"category_id", "needs_review", "excluded"}
+        supplied_fields = self.model_fields_set & change_fields
+        if not supplied_fields:
+            raise ValueError("Provide at least one transaction change")
+        null_boolean_fields = [
+            field
+            for field in ("needs_review", "excluded")
+            if field in supplied_fields and getattr(self, field) is None
+        ]
+        if null_boolean_fields:
+            raise ValueError(f"{', '.join(null_boolean_fields)} must be true or false")
+        return self
 
 
 class TransactionUpdateRequest(BaseModel):

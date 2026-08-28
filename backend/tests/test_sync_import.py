@@ -128,6 +128,30 @@ def test_identical_payload_is_idempotent_and_tombstone_survives(monkeypatch) -> 
         db.close()
 
 
+def test_sync_preserves_custom_account_name_and_tracks_latest_provider_name(monkeypatch) -> None:
+    connection = _reset_with_connection()
+    payload = _payload([])
+    monkeypatch.setattr(sync_service, "fetch_account_set", lambda *args, **kwargs: copy.deepcopy(payload))
+
+    assert sync_service.perform_sync(connection.id)["status"] == "success"
+
+    with SessionLocal() as db:
+        account = db.scalar(select(Account).where(Account.simplefin_connection_id == connection.id))
+        assert account is not None
+        account.name = "Household Spending"
+        account.version += 1
+        db.commit()
+
+    payload["accounts"][0]["name"] = "Provider Renamed Checking"
+    assert sync_service.perform_sync(connection.id)["status"] == "success"
+
+    with SessionLocal() as db:
+        account = db.scalar(select(Account).where(Account.simplefin_connection_id == connection.id))
+        assert account is not None
+        assert account.name == "Household Spending"
+        assert account.extra["_simplefin_name"] == "Provider Renamed Checking"
+
+
 def test_posted_replacement_reuses_pending_budget_transaction_and_manual_split(monkeypatch) -> None:
     connection = _reset_with_connection()
     responses = [

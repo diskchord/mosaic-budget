@@ -2,10 +2,16 @@
 
 ## Unreleased
 
+- Prepared the project for public GitHub collaboration with a concise README, Apache 2.0 licensing, CI, issue forms, pull-request guidance, and contribution and vulnerability-reporting policies
+- Added the Compose backup runner with atomic dumps, isolated restore verification, safe overlap locking, verified-backup records, retries, and retention
 - Replaced the inconsistent chart/mask branding with one polished mosaic-style vector mark across the app, favicon, and PWA
 - Corrected topbar grid placement and responsive page-header spacing
 - Added a selected-month **Run rules** action that processes only transactions still waiting to be sorted
 - Added reversible duplicate SimpleFIN account marking so duplicate-feed transactions do not appear or affect the budget while source history remains intact
+- Added desktop and touch-friendly inbox multi-selection, group drag-and-drop, an accessible **Assign selected...** action, and atomic batch assignment with group Undo
+- Added atomic multi-transaction editing for category, review, and budget-inclusion changes from the Transactions list
+- Added editable names for manual and SimpleFIN accounts, preserved those names across synchronization, resolved account-based rule summaries to readable names, and moved duplicate feeds out of the regular account list into a muted connection-manager state
+- Refined income progress wording, category drop-target padding, icon spacing, month-arrow alignment, transaction selection affordances, and desktop branding
 - Added Alembic revision `0003_duplicate_accounts`
 
 ## 0.2.0 - 2026-08-27

@@ -82,7 +82,7 @@ make backup
 ### Locate backups
 
 ```bash
-ls -lh "${BACKUP_PATH:-./backups}"
+docker compose exec backup ls -lh /backups
 ```
 
 Files use PostgreSQL custom format and end in `.dump`.
@@ -102,11 +102,10 @@ Example from the project directory:
 ```bash
 BACKUP=./backups/mosaic-YYYYMMDDTHHMMSSZ.dump
 
-docker compose exec db createdb -U "$POSTGRES_USER" mosaic_restore
-cat "$BACKUP" | docker compose exec -T db pg_restore \
-  -U "$POSTGRES_USER" \
-  -d mosaic_restore \
-  --clean --if-exists --no-owner
+docker compose exec db sh -c 'createdb -U "$POSTGRES_USER" mosaic_restore'
+docker compose exec -T db sh -c \
+  'pg_restore -U "$POSTGRES_USER" -d mosaic_restore --clean --if-exists --no-owner' \
+  < "$BACKUP"
 ```
 
 Inspect the restored database before cutover. Do not destroy the original PostgreSQL volume during recovery.

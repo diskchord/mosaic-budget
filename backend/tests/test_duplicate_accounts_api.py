@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import uuid
 from datetime import date
 from decimal import Decimal
 
@@ -177,3 +178,65 @@ def test_manual_account_cannot_be_marked_duplicate() -> None:
         )
         assert response.status_code == 400
         assert response.json()["detail"] == "Only SimpleFIN accounts can be marked as duplicates"
+
+
+def test_budget_account_catalog_includes_accounts_that_are_not_transaction_eligible() -> None:
+    account, _visible, _independently_excluded, _deleted = _reset_with_duplicate_candidate()
+
+    with TestClient(app) as client:
+        headers = _login(client)
+        response = client.patch(
+            f"/api/connections/accounts/{account.id}",
+            headers=headers,
+            json={"version": account.version, "is_active": False, "is_duplicate": True},
+        )
+        assert response.status_code == 200
+
+        budget = client.get("/api/budget", params={"month": "2026-08"}).json()
+        assert str(account.id) not in {item["id"] for item in budget["accounts"]}
+        catalog_account = next(item for item in budget["account_catalog"] if item["id"] == str(account.id))
+        assert catalog_account["name"] == "Checking duplicate"
+        assert catalog_account["is_active"] is False
+        assert catalog_account["is_duplicate"] is True
+
+
+def test_manual_account_name_is_trimmed_and_blank_names_are_rejected() -> None:
+    _reset_with_duplicate_candidate()
+
+    with TestClient(app) as client:
+        headers = _login(client)
+        budget = client.get("/api/budget", params={"month": "2026-08"}).json()
+        cash = next(item for item in budget["accounts"] if item["source_type"] == "manual")
+
+        blank = client.patch(
+            f"/api/connections/accounts/{cash['id']}",
+            headers=headers,
+            json={"version": cash["version"], "name": "   "},
+        )
+        assert blank.status_code == 400
+        assert blank.json()["detail"] == "Account name cannot be blank"
+
+        renamed = client.patch(
+            f"/api/connections/accounts/{cash['id']}",
+            headers=headers,
+            json={"version": cash["version"], "name": "  Pocket Money  "},
+        )
+        assert renamed.status_code == 200
+        renamed_account = renamed.json()["account"]
+        assert renamed_account["name"] == "Pocket Money"
+        assert renamed_account["version"] == cash["version"] + 1
+
+        refreshed = client.get("/api/budget", params={"month": "2026-08"}).json()
+        assert next(item for item in refreshed["accounts"] if item["id"] == cash["id"])["name"] == "Pocket Money"
+        assert next(item for item in refreshed["account_catalog"] if item["id"] == cash["id"])["name"] == "Pocket Money"
+
+    with SessionLocal() as db:
+        audit = db.scalar(
+            select(AuditEvent)
+            .where(AuditEvent.object_type == "account", AuditEvent.object_id == uuid.UUID(cash["id"]))
+            .order_by(AuditEvent.created_at.desc())
+        )
+        assert audit is not None
+        assert audit.action == "account.updated"
+        assert audit.before["name"] == "Cash Wallet"
+        assert audit.after["name"] == "Pocket Money"

@@ -57,3 +57,6 @@ Normal transaction deletion is reversible and retains a tombstone. This is delib
 ## Reporting a vulnerability
 
 Do not include credentials, Access URLs, raw payloads, or real transaction data in an issue report. Reproduce with synthetic data and include only sanitized logs.
+
+Follow the repository's [private vulnerability-reporting policy](../SECURITY.md)
+instead of publishing security details in a normal issue.

@@ -20,7 +20,10 @@ test:
 verify:
 	python3 -m compileall -q backend/app backend/alembic backend/tests
 	node --check backend/app/static/app.js
-	cd backend && PYTHONPATH=. pytest
+	node --check backend/app/static/sw.js
+	sh -n scripts/generate-secrets.sh ops/backups/backup.sh
+	python3 -c "import json, pathlib, xml.etree.ElementTree as ET; root = pathlib.Path('.'); json.loads((root / 'backend/app/static/manifest.webmanifest').read_text()); ET.parse(root / 'backend/app/static/icon.svg')"
+	cd backend && PYTHONPATH=.$${PYTHONPATH:+:$$PYTHONPATH} pytest
 
 demo:
 	docker compose run --rm web python -m app.seed_demo
