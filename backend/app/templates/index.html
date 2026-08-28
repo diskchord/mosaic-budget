@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#ffbf2f">
+  <meta name="description" content="A self-hosted, reliable household budget powered by SimpleFIN.">
+  <title>{{ app_name }}</title>
+  <link rel="manifest" href="/static/manifest.webmanifest">
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body data-theme="citrus">
+  <div id="boot-screen" class="boot-screen" aria-live="polite">
+    <img class="brand-mark brand-mark--large" src="/static/icon.svg" alt="" aria-hidden="true">
+    <strong>{{ app_name }}</strong>
+    <div class="boot-pulse"></div>
+  </div>
+
+  <section id="login-view" class="login-view hidden" aria-labelledby="login-title">
+    <div class="login-art" aria-hidden="true">
+      <div class="orbit orbit-one"></div>
+      <div class="orbit orbit-two"></div>
+      <div class="login-bubble bubble-a">$84</div>
+      <div class="login-bubble bubble-b">$12</div>
+      <div class="login-bubble bubble-c">+$180</div>
+    </div>
+    <form id="login-form" class="login-card">
+      <div class="brand-lockup">
+        <img class="brand-mark" src="/static/icon.svg" alt="" aria-hidden="true">
+        <div><small>WELCOME TO</small><h1 id="login-title">{{ app_name }}</h1></div>
+      </div>
+      <p>Plan every dollar. Let the background worker handle the bank data.</p>
+      <label>Email<input id="login-email" name="email" type="email" autocomplete="username" required></label>
+      <label>Password<input id="login-password" name="password" type="password" autocomplete="current-password" required></label>
+      <button class="button button--primary button--wide" type="submit">Sign in</button>
+      <div id="login-error" class="form-error" role="alert"></div>
+    </form>
+  </section>
+
+  <div id="app-shell" class="app-shell hidden">
+    <header class="topbar">
+      <button id="brand-button" class="brand-button" type="button" aria-label="Open budget">
+        <img class="brand-mark" src="/static/icon.svg" alt="" aria-hidden="true">
+        <span class="brand-name">{{ app_name }}</span>
+      </button>
+      <div id="month-control" class="month-control">
+        <button id="month-prev" class="icon-button" type="button" aria-label="Previous month">‹</button>
+        <button id="month-label" class="month-label" type="button" aria-label="Choose month"></button>
+        <button id="month-next" class="icon-button" type="button" aria-label="Next month">›</button>
+      </div>
+      <div class="topbar-actions">
+        <button id="sync-status" class="sync-pill" type="button" aria-label="Synchronization status">
+          <span class="status-dot"></span><span class="sync-label">Checking</span>
+        </button>
+        <button id="avatar-button" class="avatar-button" type="button" aria-label="Open settings"></button>
+      </div>
+    </header>
+
+    <aside class="side-nav" aria-label="Main navigation">
+      <button class="nav-item active" data-view="budget" type="button"><span data-icon="budget"></span><b>Budget</b></button>
+      <button class="nav-item" data-view="transactions" type="button"><span data-icon="transactions"></span><b>Transactions</b></button>
+      <button class="nav-item" data-view="rules" type="button"><span data-icon="rules"></span><b>Rules</b></button>
+      <button class="nav-item" data-view="more" type="button"><span data-icon="more"></span><b>More</b></button>
+    </aside>
+
+    <main id="app-view" class="app-view" tabindex="-1"></main>
+
+    <button id="inbox-button" class="inbox-button hidden" type="button">
+      <span data-icon="inbox"></span><b id="inbox-count">0</b><span>to sort</span>
+    </button>
+
+    <nav class="bottom-nav" aria-label="Main navigation">
+      <button class="nav-item active" data-view="budget" type="button"><span data-icon="budget"></span><b>Budget</b></button>
+      <button class="nav-item" data-view="transactions" type="button"><span data-icon="transactions"></span><b>Transactions</b></button>
+      <button class="nav-item" data-view="rules" type="button"><span data-icon="rules"></span><b>Rules</b></button>
+      <button class="nav-item" data-view="more" type="button"><span data-icon="more"></span><b>More</b></button>
+    </nav>
+  </div>
+
+  <div id="scrim" class="scrim hidden"></div>
+  <aside id="transaction-tray" class="transaction-tray" aria-hidden="true" aria-labelledby="tray-title">
+    <div class="sheet-handle"></div>
+    <header class="tray-header">
+      <div><small>INBOX</small><h2 id="tray-title">Transactions to sort</h2></div>
+      <button id="tray-close" class="icon-button" type="button" aria-label="Close">×</button>
+    </header>
+    <p class="tray-help">Drag a bubble onto a budget category, or tap it to assign or split it.</p>
+    <div id="transaction-bubbles" class="transaction-bubbles"></div>
+  </aside>
+
+  <div id="modal-root" class="modal-root" aria-live="polite"></div>
+  <div id="toast-root" class="toast-root" aria-live="polite" aria-atomic="true"></div>
+
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

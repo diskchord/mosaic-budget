@@ -1,0 +1,12 @@
+{
+  "name": "Mosaic Budget",
+  "short_name": "Mosaic",
+  "description": "A self-hosted, mobile-first SimpleFIN budget.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#fff9eb",
+  "theme_color": "#ffbf2f",
+  "icons": [
+    {"src": "/static/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable"}
+  ]
+}

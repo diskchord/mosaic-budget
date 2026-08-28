@@ -1,0 +1,1 @@
+"""Mosaic Budget application package."""
