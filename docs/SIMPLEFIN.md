@@ -74,6 +74,12 @@ A provider may retain a transaction ID when pending becomes posted, or replace i
 
 Manual category, date, and payee locks survive source updates.
 
+## Transaction display names
+
+The [SimpleFIN protocol](https://www.simplefin.org/protocol.html#transaction) guarantees one human-readable transaction `description`; it does not define a separate merchant, payee, or recipient field. Its optional `extra` object is provider-defined. Mosaic therefore keeps the description and extra data unchanged in the source ledger and uses only explicit provider keys or narrow, high-confidence ACH company fields to compute a shorter display payee. Manual payees and rule-renamed payees take precedence, and any ambiguous description is shown verbatim.
+
+The computed display value is presentation-only. Original-description and payee rule conditions continue to evaluate their existing stored fields, so adding or refining a display parser does not silently change automation.
+
 ## Disconnecting
 
 Pausing leaves the encrypted Access URL in place. Disconnecting requires typing the connection name and removes the encrypted credential while retaining all imported data. Reconnecting later requires a new setup token.

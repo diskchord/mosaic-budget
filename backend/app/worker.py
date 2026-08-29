@@ -11,6 +11,7 @@ from .config import get_settings
 from .db import SessionLocal
 from .models import BackupRecord, SimpleFinConnection, WorkerHeartbeat, Workspace
 from .security import purge_expired_sessions
+from .services.balance_alerts import evaluate_balance_alerts
 from .services.notifications import open_incident, process_outbox, resolve_incident
 from .services.sync import perform_sync
 from .utils import ensure_utc, utcnow
@@ -35,6 +36,7 @@ def heartbeat(db, detail: dict | None = None) -> None:
 
 def monitor_health(db) -> None:
     now = utcnow()
+    evaluate_balance_alerts(db)
     for connection in db.scalars(select(SimpleFinConnection).where(SimpleFinConnection.enabled.is_(True))).all():
         stale_after = timedelta(minutes=connection.sync_interval_minutes * 3)
         baseline = ensure_utc(connection.last_success_at or connection.created_at)

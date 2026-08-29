@@ -10,9 +10,10 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..db import get_db
 from ..models import Account, BudgetTransaction, SimpleFinConnection, SyncRun
-from ..schemas import SimpleFinClaimRequest
+from ..schemas import AccountBatchUpdateItem, AccountBatchUpdateRequest, SimpleFinClaimRequest
 from ..security import encrypt_secret
 from ..services.audit import write_audit
+from ..services.balance_alerts import evaluate_balance_alerts
 from ..services.budgets import serialize_account
 from ..services.simplefin import SimpleFinError, claim_setup_token
 from ..utils import utcnow
@@ -58,6 +59,137 @@ def connection_payload(connection: SimpleFinConnection) -> dict:
         "disconnected_at": connection.disconnected_at.isoformat() if connection.disconnected_at else None,
         "version": connection.version,
     }
+
+
+def _apply_account_values(
+    db: Session,
+    account: Account,
+    *,
+    name: str | None,
+    is_budget: bool | None,
+    is_active: bool | None,
+    is_duplicate: bool | None,
+) -> tuple[int, int]:
+    suppressed_count = 0
+    restored_count = 0
+    if is_duplicate is not None and is_duplicate != account.is_duplicate:
+        if is_duplicate:
+            result = db.execute(
+                update(BudgetTransaction)
+                .where(
+                    BudgetTransaction.account_id == account.id,
+                    BudgetTransaction.deleted_at.is_(None),
+                    BudgetTransaction.excluded.is_(False),
+                )
+                .values(
+                    excluded=True,
+                    suppressed_by_duplicate_account=True,
+                    version=BudgetTransaction.version + 1,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            suppressed_count = int(result.rowcount or 0)
+        else:
+            result = db.execute(
+                update(BudgetTransaction)
+                .where(
+                    BudgetTransaction.account_id == account.id,
+                    BudgetTransaction.suppressed_by_duplicate_account.is_(True),
+                )
+                .values(
+                    excluded=False,
+                    suppressed_by_duplicate_account=False,
+                    version=BudgetTransaction.version + 1,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            restored_count = int(result.rowcount or 0)
+        account.is_duplicate = is_duplicate
+    if name is not None:
+        account.name = name
+    if is_budget is not None:
+        account.is_budget = is_budget
+    if is_active is not None:
+        account.is_active = is_active
+    return suppressed_count, restored_count
+
+
+def _write_account_update_audit(
+    db: Session,
+    *,
+    account: Account,
+    before: dict,
+    auth: AuthContext,
+    suppressed_count: int,
+    restored_count: int,
+) -> None:
+    write_audit(
+        db,
+        workspace_id=auth.user.workspace_id,
+        actor_user_id=auth.user.id,
+        action="account.updated",
+        object_type="account",
+        object_id=account.id,
+        before=before,
+        after=serialize_account(account),
+        detail={
+            "transactions_suppressed": suppressed_count,
+            "transactions_restored": restored_count,
+        },
+    )
+
+
+def _evaluate_account_alerts(db: Session, workspace_id: uuid.UUID, account_ids: set[uuid.UUID]) -> None:
+    if not account_ids:
+        return
+    db.flush()
+    evaluate_balance_alerts(db, workspace_id=workspace_id, account_ids=account_ids)
+
+
+def _batch_accounts_for_connection(
+    db: Session,
+    account_inputs: list[AccountBatchUpdateItem],
+    connection: SimpleFinConnection,
+    workspace_id: uuid.UUID,
+) -> list[Account]:
+    requested_ids = [item.id for item in account_inputs]
+    requested_versions = {item.id: item.version for item in account_inputs}
+    rows = db.scalars(
+        select(Account)
+        .where(
+            Account.id.in_(requested_ids),
+            Account.workspace_id == workspace_id,
+            Account.simplefin_connection_id == connection.id,
+        )
+        .order_by(Account.id)
+        .with_for_update()
+    ).all()
+    by_id = {account.id: account for account in rows}
+    if set(by_id) != set(requested_ids):
+        raise HTTPException(status_code=404, detail="One or more accounts were not found in this connection")
+
+    accounts = [by_id[account_id] for account_id in requested_ids]
+    if any(account.source_type != "simplefin" for account in accounts):
+        raise HTTPException(status_code=400, detail="Only SimpleFIN accounts can be updated through a connection")
+
+    conflicts = [
+        {
+            "id": str(account.id),
+            "expected_version": requested_versions[account.id],
+            "current": serialize_account(account),
+        }
+        for account in accounts
+        if account.version != requested_versions[account.id]
+    ]
+    if conflicts:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "One or more accounts changed on another device",
+                "conflicts": conflicts,
+            },
+        )
+    return accounts
 
 
 @router.get("")
@@ -143,6 +275,11 @@ def update_connection(
         before=before,
         after=connection_payload(connection),
     )
+    if enabled is not None:
+        account_ids = set(
+            db.scalars(select(Account.id).where(Account.simplefin_connection_id == connection.id)).all()
+        )
+        _evaluate_account_alerts(db, auth.user.workspace_id, account_ids)
     db.commit()
     return {"connection": connection_payload(connection)}
 
@@ -194,6 +331,10 @@ def disconnect_simplefin(
         after=connection_payload(connection),
         detail={"imported_transactions_retained": True},
     )
+    account_ids = set(
+        db.scalars(select(Account.id).where(Account.simplefin_connection_id == connection.id)).all()
+    )
+    _evaluate_account_alerts(db, auth.user.workspace_id, account_ids)
     db.commit()
     return {"ok": True, "connection": connection_payload(connection)}
 
@@ -209,6 +350,62 @@ def list_connection_accounts(
         select(Account).where(Account.simplefin_connection_id == connection.id).order_by(Account.name)
     ).all()
     return {"accounts": [serialize_account(account) for account in rows]}
+
+
+@router.patch("/{connection_id}/accounts")
+def update_connection_accounts(
+    connection_id: uuid.UUID,
+    payload: AccountBatchUpdateRequest,
+    auth: AuthContext = Depends(require_admin_write),
+    db: Session = Depends(get_db),
+) -> dict:
+    connection = _connection_for_user(db, connection_id, auth.user.workspace_id)
+    accounts = _batch_accounts_for_connection(
+        db,
+        payload.accounts,
+        connection,
+        auth.user.workspace_id,
+    )
+
+    updated_count = 0
+    updated_account_ids: set[uuid.UUID] = set()
+    for account, item in zip(accounts, payload.accounts, strict=True):
+        changed = (
+            account.name != item.name
+            or account.is_budget != item.is_budget
+            or account.is_active != item.is_active
+            or account.is_duplicate != item.is_duplicate
+        )
+        if not changed:
+            continue
+
+        before = serialize_account(account)
+        suppressed_count, restored_count = _apply_account_values(
+            db,
+            account,
+            name=item.name,
+            is_budget=item.is_budget,
+            is_active=item.is_active,
+            is_duplicate=item.is_duplicate,
+        )
+        account.version += 1
+        _write_account_update_audit(
+            db,
+            account=account,
+            before=before,
+            auth=auth,
+            suppressed_count=suppressed_count,
+            restored_count=restored_count,
+        )
+        updated_count += 1
+        updated_account_ids.add(account.id)
+
+    _evaluate_account_alerts(db, auth.user.workspace_id, updated_account_ids)
+    db.commit()
+    return {
+        "accounts": [serialize_account(account) for account in accounts],
+        "updated_count": updated_count,
+    }
 
 
 @router.patch("/accounts/{account_id}")
@@ -238,62 +435,24 @@ def update_account(
         raise HTTPException(status_code=400, detail="Account name cannot be blank")
 
     before = serialize_account(account)
-    suppressed_count = 0
-    restored_count = 0
-    if is_duplicate is not None and is_duplicate != account.is_duplicate:
-        if is_duplicate:
-            result = db.execute(
-                update(BudgetTransaction)
-                .where(
-                    BudgetTransaction.account_id == account.id,
-                    BudgetTransaction.deleted_at.is_(None),
-                    BudgetTransaction.excluded.is_(False),
-                )
-                .values(
-                    excluded=True,
-                    suppressed_by_duplicate_account=True,
-                    version=BudgetTransaction.version + 1,
-                )
-                .execution_options(synchronize_session=False)
-            )
-            suppressed_count = int(result.rowcount or 0)
-        else:
-            result = db.execute(
-                update(BudgetTransaction)
-                .where(
-                    BudgetTransaction.account_id == account.id,
-                    BudgetTransaction.suppressed_by_duplicate_account.is_(True),
-                )
-                .values(
-                    excluded=False,
-                    suppressed_by_duplicate_account=False,
-                    version=BudgetTransaction.version + 1,
-                )
-                .execution_options(synchronize_session=False)
-            )
-            restored_count = int(result.rowcount or 0)
-        account.is_duplicate = is_duplicate
-    if clean_name is not None:
-        account.name = clean_name
-    if is_budget is not None:
-        account.is_budget = is_budget
-    if is_active is not None:
-        account.is_active = is_active
-    account.version += 1
-    write_audit(
+    suppressed_count, restored_count = _apply_account_values(
         db,
-        workspace_id=auth.user.workspace_id,
-        actor_user_id=auth.user.id,
-        action="account.updated",
-        object_type="account",
-        object_id=account.id,
-        before=before,
-        after=serialize_account(account),
-        detail={
-            "transactions_suppressed": suppressed_count,
-            "transactions_restored": restored_count,
-        },
+        account,
+        name=clean_name,
+        is_budget=is_budget,
+        is_active=is_active,
+        is_duplicate=is_duplicate,
     )
+    account.version += 1
+    _write_account_update_audit(
+        db,
+        account=account,
+        before=before,
+        auth=auth,
+        suppressed_count=suppressed_count,
+        restored_count=restored_count,
+    )
+    _evaluate_account_alerts(db, auth.user.workspace_id, {account.id})
     db.commit()
     return {"account": serialize_account(account)}
 

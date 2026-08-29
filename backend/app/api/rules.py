@@ -26,6 +26,7 @@ from .deps import AuthContext, current_auth, require_write
 router = APIRouter(prefix="/api/rules", tags=["rules"])
 
 MAX_MANUAL_RULE_TRANSACTIONS = 5000
+ALLOCATION_ACTIONS = {"assign_category", "split_fixed", "split_percent"}
 
 ALLOWED_FIELDS = {
     "original_description",
@@ -239,20 +240,38 @@ def _run_candidate_filters(
     )
 
 
-def _apply_existing(db: Session, rule: Rule, scope: str) -> int:
+def _rule_has_allocation_action(rule: Rule) -> bool:
+    return any(action.get("type") in ALLOCATION_ACTIONS for action in rule.actions)
+
+
+def _empty_apply_result() -> dict[str, int]:
+    return {
+        "transactions_changed": 0,
+        "transactions_sorted": 0,
+        "transactions_still_unsorted": 0,
+    }
+
+
+def _apply_existing(db: Session, rule: Rule, scope: str) -> dict[str, int]:
     query = _candidate_query(rule.workspace_id)
     if scope == "unassigned":
         query = query.where(not_(BudgetTransaction.allocations.any()))
     rows = db.scalars(query.limit(5000)).unique().all()
-    changed = 0
+    result = _empty_apply_result()
+    has_allocation_action = _rule_has_allocation_action(rule)
     for transaction in rows:
         if scope != "eligible" and scope != "unassigned":
             continue
+        initially_unassigned = not transaction.allocations
         before_version = transaction.version
-        apply_rules_to_transaction(db, transaction, rules=[rule])
+        matched = apply_rules_to_transaction(db, transaction, rules=[rule])
         if transaction.version != before_version:
-            changed += 1
-    return changed
+            result["transactions_changed"] += 1
+        if initially_unassigned and transaction.allocations:
+            result["transactions_sorted"] += 1
+        elif initially_unassigned and matched and has_allocation_action:
+            result["transactions_still_unsorted"] += 1
+    return result
 
 
 @router.get("")
@@ -321,6 +340,7 @@ def run_rules(
     scanned = 0
     changed = 0
     sorted_count = 0
+    still_unsorted_count = 0
     for transaction_id in candidate_ids:
         transaction = db.scalar(
             select(BudgetTransaction)
@@ -337,17 +357,20 @@ def run_rules(
             continue
         scanned += 1
         before_version = transaction.version
-        apply_rules_to_transaction(db, transaction, rules=rules)
+        matched = apply_rules_to_transaction(db, transaction, rules=rules)
         if transaction.version != before_version:
             changed += 1
         if transaction.allocations:
             sorted_count += 1
+        elif any(_rule_has_allocation_action(rule) for rule in matched):
+            still_unsorted_count += 1
 
     result = {
         "month": month_start.isoformat()[:7],
         "transactions_scanned": scanned,
         "transactions_changed": changed,
         "transactions_sorted": sorted_count,
+        "transactions_still_unsorted": still_unsorted_count,
     }
     write_audit(
         db,
@@ -383,7 +406,12 @@ def create_rule(
     db.add(rule)
     db.flush()
     _save_revision(db, rule, auth.user.id)
-    changed = _apply_existing(db, rule, payload.apply_now) if payload.apply_now != "none" else 0
+    applied = _apply_existing(db, rule, payload.apply_now) if payload.apply_now != "none" else _empty_apply_result()
+    historical = {
+        "historical_transactions_changed": applied["transactions_changed"],
+        "historical_transactions_sorted": applied["transactions_sorted"],
+        "historical_transactions_still_unsorted": applied["transactions_still_unsorted"],
+    }
     write_audit(
         db,
         workspace_id=auth.user.workspace_id,
@@ -392,10 +420,10 @@ def create_rule(
         object_type="rule",
         object_id=rule.id,
         after=rule_snapshot(rule),
-        detail={"historical_transactions_changed": changed},
+        detail=historical,
     )
     db.commit()
-    return {"rule": rule_snapshot(rule), "historical_transactions_changed": changed}
+    return {"rule": rule_snapshot(rule), **historical}
 
 
 @router.patch("/{rule_id}")
@@ -420,7 +448,12 @@ def update_rule(
     rule.stop_processing = payload.stop_processing
     rule.version += 1
     _save_revision(db, rule, auth.user.id)
-    changed = _apply_existing(db, rule, payload.apply_now) if payload.apply_now != "none" else 0
+    applied = _apply_existing(db, rule, payload.apply_now) if payload.apply_now != "none" else _empty_apply_result()
+    historical = {
+        "historical_transactions_changed": applied["transactions_changed"],
+        "historical_transactions_sorted": applied["transactions_sorted"],
+        "historical_transactions_still_unsorted": applied["transactions_still_unsorted"],
+    }
     write_audit(
         db,
         workspace_id=auth.user.workspace_id,
@@ -430,10 +463,10 @@ def update_rule(
         object_id=rule.id,
         before=before,
         after=rule_snapshot(rule),
-        detail={"historical_transactions_changed": changed},
+        detail=historical,
     )
     db.commit()
-    return {"rule": rule_snapshot(rule), "historical_transactions_changed": changed}
+    return {"rule": rule_snapshot(rule), **historical}
 
 
 @router.post("/{rule_id}/apply")
@@ -446,7 +479,7 @@ def apply_rule_now(
     if scope not in {"unassigned", "eligible"}:
         raise HTTPException(status_code=400, detail="Scope must be unassigned or eligible")
     rule = _rule_for_user(db, rule_id, auth.user.workspace_id)
-    changed = _apply_existing(db, rule, scope)
+    applied = _apply_existing(db, rule, scope)
     write_audit(
         db,
         workspace_id=auth.user.workspace_id,
@@ -454,10 +487,10 @@ def apply_rule_now(
         action="rule.applied",
         object_type="rule",
         object_id=rule.id,
-        detail={"scope": scope, "transactions_changed": changed},
+        detail={"scope": scope, **applied},
     )
     db.commit()
-    return {"transactions_changed": changed}
+    return applied
 
 
 @router.delete("/{rule_id}")

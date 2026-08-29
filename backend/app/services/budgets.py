@@ -21,7 +21,9 @@ from ..models import (
     SimpleFinConnection,
 )
 from ..utils import money_str, next_month
+from .balance_alerts import account_balance_unavailable_reason
 from .structure import availability_dict, lifetime_active, month_exclusion_ids, visibility_reason
+from .transaction_labels import transaction_display_payee
 
 
 def ensure_month_records(db: Session, workspace_id: uuid.UUID, month: date) -> None:
@@ -71,6 +73,7 @@ def ensure_month_records(db: Session, workspace_id: uuid.UUID, month: date) -> N
 
 
 def serialize_account(account: Account) -> dict[str, Any]:
+    balance_alert_unavailable_reason = account_balance_unavailable_reason(account)
     return {
         "id": str(account.id),
         "name": account.name,
@@ -82,6 +85,8 @@ def serialize_account(account: Account) -> dict[str, Any]:
         "is_budget": account.is_budget,
         "is_active": account.is_active,
         "is_duplicate": account.is_duplicate,
+        "balance_alert_available": balance_alert_unavailable_reason is None,
+        "balance_alert_unavailable_reason": balance_alert_unavailable_reason,
         "version": account.version,
     }
 
@@ -95,6 +100,13 @@ def serialize_transaction(transaction: BudgetTransaction, include_allocations: b
         "effective_date": transaction.effective_date.isoformat(),
         "amount": money_str(transaction.amount),
         "payee": transaction.payee,
+        "display_payee": transaction_display_payee(
+            transaction.payee,
+            source_kind=transaction.source_kind,
+            imported_description=transaction.imported_description,
+            imported_extra=transaction.imported_extra,
+            manual_payee_lock=transaction.manual_payee_lock,
+        ),
         "imported_description": transaction.imported_description,
         "note": transaction.note,
         "tags": transaction.tags,
@@ -410,6 +422,8 @@ def get_budget_state(db: Session, workspace_id: uuid.UUID, month: date) -> dict[
             BudgetTransaction.workspace_id == workspace_id,
             BudgetTransaction.deleted_at.is_(None),
             BudgetTransaction.excluded.is_(False),
+            BudgetTransaction.suppressed_by_duplicate_account.is_(False),
+            BudgetTransaction.account.has(Account.is_duplicate.is_(False)),
             not_(BudgetTransaction.allocations.any()),
         )
         .options(selectinload(BudgetTransaction.account), selectinload(BudgetTransaction.allocations))
@@ -420,6 +434,7 @@ def get_budget_state(db: Session, workspace_id: uuid.UUID, month: date) -> dict[
     account_catalog = db.scalars(
         select(Account)
         .where(Account.workspace_id == workspace_id)
+        .options(selectinload(Account.simplefin_connection))
         .order_by(Account.source_type, Account.name)
     ).all()
     accounts = [account for account in account_catalog if account.is_active and not account.is_duplicate]

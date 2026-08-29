@@ -9,7 +9,7 @@
 5. Build and start with `docker compose up -d --build`.
 6. Confirm `docker compose ps` shows `db`, `web`, `worker`, and `backup` healthy after startup.
 7. Sign in and connect SimpleFIN.
-8. Configure SMTP and/or ntfy, then send a test alert.
+8. Configure SMTP2GO/email and/or ntfy, send a test alert, and verify any account balance alert uses only its selected channels.
 9. Run `make backup` and confirm the backup record appears under **More → Operations**.
 10. Configure an external monitor for `/health/sync` and/or `EXTERNAL_HEARTBEAT_URL`.
 
@@ -25,11 +25,11 @@ One-shot service. Applies Alembic migrations and runs the idempotent bootstrap. 
 
 ### web
 
-FastAPI, static PWA, authentication, budget and transaction APIs, administration, and server-sent events.
+FastAPI, static PWA, authentication, budget, transaction, Analytics, and balance-alert APIs, administration, and server-sent events.
 
 ### worker
 
-SimpleFIN scheduling, import and reconciliation, rule application, notification delivery, stale-sync monitoring, backup monitoring, session cleanup, and external heartbeat.
+SimpleFIN scheduling, import and reconciliation, rule application, account-balance evaluation, notification delivery, stale-sync monitoring, backup monitoring, session cleanup, and external heartbeat.
 
 ### backup
 
@@ -60,6 +60,14 @@ The run history records routine/deep mode, window, account and transaction count
 A failed sync is rescheduled with bounded exponential delay. Authorization and payment errors alert immediately; transient errors alert after repeated failures. The request attempt remains in the rolling quota log, preventing an outage from causing an uncontrolled polling loop.
 
 The **Retry now** control only marks the connection due. The worker still owns all provider requests and quota enforcement.
+
+## Account balance alerts
+
+Only the owner can create, edit, disable, or delete balance alerts. The web API accepts only notification channels that are configured in the deployment environment. SMTP2GO uses the existing SMTP settings; ntfy uses the configured server, topic, and optional token.
+
+An alert is evaluated when it is created or changed, after a successful synchronization or manual transaction changes its account balance, when account/connection availability changes, and during the worker's periodic health-monitor pass. Crossing the configured below/above threshold opens one deduplicated incident and queues delivery only to the channels selected on that alert. Repeated checks while it remains triggered do not enqueue duplicate trigger messages. Returning to the other side resolves the incident and queues a recovery message with the recovered balance to the same selected channels. Pausing, deleting, or materially reconfiguring an alert closes the old episode silently rather than claiming the balance recovered.
+
+Unlike ordinary operational incidents, a balance-alert message is intentionally financial: it includes the alert name, account name, current balance, and threshold. Confirm the SMTP recipient and ntfy topic membership before enabling one. Delivery still uses the durable outbox, retry, and exponential-backoff behavior described by the notification pipeline. If a selected channel is temporarily unconfigured, its queued delivery remains retryable until deployment configuration is restored. Disabling, deleting, or materially reconfiguring an alert cancels any unsent trigger delivery from the old alert episode.
 
 ## Logs
 

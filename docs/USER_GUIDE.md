@@ -6,6 +6,14 @@ The selected month opens on the Budget screen. Income is always first. Each visi
 
 Select a planned value to change it. Planned amounts belong to that individual month. Fund categories carry their cumulative remaining amount between months; ordinary categories start from the selected month's plan.
 
+## Compare months with Analytics
+
+Open **Analytics** to compare actual activity across an inclusive range of months. Choose the first and last month to see income, spending, net cash flow, transaction coverage, and category activity together. The default range is the trailing 12 months ending with the current month, and a range may contain up to 120 months.
+
+Monthly rows make adjacent periods easy to compare, while range totals and averages summarize the complete selection. Category comparisons use the same income-versus-expense signs as the budget. Months without activity are shown as zero rather than omitted.
+
+Transactions still waiting to be sorted are disclosed separately and do not get guessed into income or spending. Deleted, excluded, duplicate-suppressed, and duplicate-account transactions are omitted from Analytics just as they are from normal budget activity.
+
 ## Sections and categories from month to month
 
 Sections and categories normally carry forward automatically after their first month. Income is protected and exists in every month, but its income categories may be managed like other categories.
@@ -45,7 +53,11 @@ Drag a checked bubble onto a category to move the entire checked group. Dragging
 
 For a keyboard-friendly alternative, check the bubbles and choose **Assign selected...**, then choose the destination category. Selecting a bubble normally still opens its transaction editor for individual assignment or splitting.
 
-The target category previews its new remaining amount before assignment. Group assignment is atomic: either every selected transaction is assigned or none are changed. After a successful assignment, **Undo** reverses the complete group together. A manual assignment locks categorization against ordinary background rules.
+The target category previews its new remaining amount before assignment. Group assignment is atomic: either every selected transaction is assigned or none are changed. After a successful drop, the inbox returns smoothly, removes the assigned bubbles, stays open, and places focus on the next available transaction. **Undo** reverses the complete group together. A manual assignment locks categorization against ordinary background rules.
+
+The inbox refreshes from the server before it opens, so a transaction categorized by a rule or another device is removed even if the page previously held an older copy. Rule runs report successful sorts separately from matching transactions that remain in **To sort** because an assignment was blocked or invalid; those transactions are left intact for review.
+
+SimpleFIN sometimes supplies a long bank-formatted description instead of a separate merchant name. When Mosaic can identify a high-confidence recipient or company, that shorter name is used as the transaction headline throughout the inbox, list, details, drag preview, and rule preview. The complete bank description remains available under **Imported source details**. A payee you edit yourself or rename with a rule always takes precedence, and ambiguous descriptions are displayed unchanged.
 
 ## Split a transaction
 
@@ -85,11 +97,23 @@ A rule may reference a category that is not present in the month currently open,
 
 Open **More → Accounts** and use the edit button to give a manual or synced account a familiar name. Account names are used throughout transaction and rule displays, remain scoped to the workspace, and are not overwritten by a later SimpleFIN synchronization.
 
-If the same bank account is imported through two SimpleFIN connections, open **More → Bank connections**, open the affected connection, and choose **Manage accounts**. Mark the redundant copy as **This is a duplicate account** and save it.
+If the same bank account is imported through two SimpleFIN connections, open **More → Bank connections**, open the affected connection, and choose **Manage accounts**. Mark the redundant copy as **This is a duplicate account**, make any other account-name or status changes, and choose **Save all accounts** once. All changes are validated and saved atomically.
 
 Mosaic immediately removes that account's transactions from the inbox, transaction lists, and budget totals. Future observations from the duplicate feed remain in the protected source ledger but stay hidden and do not run rules. Clearing the duplicate setting restores transactions that Mosaic hid for this reason; transactions you excluded separately remain excluded.
 
-Duplicate accounts are omitted from the regular **More → Accounts** list. They remain visible with a muted **Duplicate** treatment inside their bank connection and its account manager, where the owner can rename them or clear the duplicate setting.
+Inactive and duplicate accounts are omitted from the regular **More → Accounts** list. Imported accounts remain visible with a muted status inside their bank connection and its account manager, where the owner can rename or reactivate them, or clear the duplicate setting.
+
+## Account balance alerts
+
+The owner can open **More → Balance alerts** and add a named threshold for an account. Choose whether Mosaic should notify when the balance falls below or rises above the amount, then select any configured SMTP2GO/email and ntfy channels. A channel must be configured by the deployment owner before it can be selected.
+
+Mosaic sends one notification when the threshold condition opens instead of repeating a message on every check. When the balance returns to the safe side, it sends a recovery notification with the new balance. Alerts can be edited, disabled, or deleted, and their current state remains visible on the More screen. An inactive, duplicate, unknown-balance, paused-connection, or disconnected account is marked unavailable instead of being presented as actively watched.
+
+Balance-alert messages deliberately include the account name, current balance, and configured threshold. Create an alert only on channels whose recipients are trusted to receive that financial information.
+
+## Sign in
+
+An incorrect email or password is reported directly beneath the sign-in form. The separate session-ended notification is reserved for a session that expires after a successful sign-in, so an ordinary credential mistake does not produce two competing messages.
 
 ## Conflicts
 

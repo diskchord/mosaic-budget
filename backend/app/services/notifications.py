@@ -3,11 +3,12 @@ from __future__ import annotations
 import smtplib
 import ssl
 import uuid
+from email.header import Header
 from email.message import EmailMessage
 from typing import Any
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -22,7 +23,7 @@ def _normalize_incident_key(value: str) -> str:
     return str(value)[:255]
 
 
-def _channels() -> list[str]:
+def configured_channels() -> list[str]:
     channels: list[str] = []
     if settings.smtp_enabled:
         channels.append("smtp")
@@ -31,14 +32,25 @@ def _channels() -> list[str]:
     return channels
 
 
-def _queue_delivery(db: Session, incident: NotificationIncident, *, recovery: bool = False) -> None:
+def _queue_delivery(
+    db: Session,
+    incident: NotificationIncident,
+    *,
+    recovery: bool = False,
+    channels: list[str] | None = None,
+) -> None:
     title = f"Resolved: {incident.title}" if recovery else incident.title
     message = (
         f"The incident has recovered.\n\n{incident.message}"
         if recovery
         else incident.message
     )
-    for channel in _channels():
+    # Operational incidents without an explicit channel selection follow the
+    # channels currently configured by the deployment. Explicit selections,
+    # such as balance-alert channels, are durable user intent: queue them even
+    # while the deployment is temporarily missing that channel's credentials.
+    selected_channels = configured_channels() if channels is None else channels
+    for channel in dict.fromkeys(selected_channels):
         db.add(
             NotificationOutbox(
                 incident_id=incident.id,
@@ -62,6 +74,7 @@ def open_incident(
     severity: str,
     title: str,
     message: str,
+    channels: list[str] | None = None,
 ) -> NotificationIncident:
     incident_key = _normalize_incident_key(incident_key)
     incident = db.scalar(
@@ -115,24 +128,57 @@ def open_incident(
         incident.title = sanitize_message(title, 200)
         incident.message = sanitize_message(message, 2000)
     if created:
-        _queue_delivery(db, incident)
+        _queue_delivery(db, incident, channels=channels)
     return incident
 
 
-def resolve_incident(db: Session, *, workspace_id: uuid.UUID, incident_key: str) -> bool:
+def resolve_incident(
+    db: Session,
+    *,
+    workspace_id: uuid.UUID,
+    incident_key: str,
+    channels: list[str] | None = None,
+    notify_recovery: bool = True,
+    cancel_pending: bool = False,
+    title: str | None = None,
+    message: str | None = None,
+) -> bool:
     incident_key = _normalize_incident_key(incident_key)
     incident = db.scalar(
         select(NotificationIncident).where(
             NotificationIncident.workspace_id == workspace_id,
             NotificationIncident.incident_key == incident_key,
             NotificationIncident.status == "open",
-        )
+        ).with_for_update()
     )
     if not incident:
         return False
+    if title is not None:
+        incident.title = sanitize_message(title, 200)
+    if message is not None:
+        incident.message = sanitize_message(message, 2000)
     incident.status = "resolved"
     incident.resolved_at = utcnow()
-    _queue_delivery(db, incident, recovery=True)
+    incident.last_seen_at = incident.resolved_at
+    if cancel_pending:
+        # A trigger can be opened and administratively closed in the same
+        # transaction. Flush its newly queued outbox rows before cancelling
+        # them so none are inserted afterward with a stale pending status.
+        db.flush()
+        db.execute(
+            update(NotificationOutbox)
+            .where(
+                NotificationOutbox.incident_id == incident.id,
+                NotificationOutbox.status.in_(["pending", "retry"]),
+            )
+            .values(
+                status="cancelled",
+                last_error="Cancelled because the incident was closed administratively.",
+            )
+            .execution_options(synchronize_session=False)
+        )
+    if notify_recovery:
+        _queue_delivery(db, incident, recovery=True, channels=channels)
     return True
 
 
@@ -140,7 +186,8 @@ def _send_smtp(payload: dict[str, Any]) -> None:
     message = EmailMessage()
     message["From"] = settings.smtp_from
     message["To"] = settings.smtp_to
-    message["Subject"] = f"[{settings.app_name}] {payload['title']}"
+    subject = " ".join(f"[{settings.app_name}] {payload['title']}".splitlines())
+    message["Subject"] = sanitize_message(subject, 300)
     message.set_content(payload["message"])
 
     if settings.smtp_ssl:
@@ -169,8 +216,14 @@ def _send_smtp(payload: dict[str, Any]) -> None:
 
 def _send_ntfy(payload: dict[str, Any]) -> None:
     url = f"{settings.ntfy_url.rstrip('/')}/{settings.ntfy_topic}"
+    title = sanitize_message(" ".join(str(payload["title"]).splitlines()), 200)
+    # httpx requires header values to be ASCII. ntfy supports RFC 2047 for
+    # Unicode titles, so preserve user-written alert names without turning a
+    # valid notification into a permanently retrying delivery.
+    if not title.isascii():
+        title = Header(title, "utf-8", maxlinelen=0).encode(linesep="")
     headers = {
-        "Title": payload["title"],
+        "Title": title,
         "Priority": {"critical": "5", "warning": "4", "info": "3"}.get(payload.get("severity"), "3"),
         "Tags": "warning" if payload.get("severity") in {"critical", "warning"} else "white_check_mark",
     }
@@ -194,6 +247,8 @@ def process_outbox(db: Session, limit: int = 20) -> int:
     processed = 0
     for row in rows:
         try:
+            if row.channel not in configured_channels():
+                raise RuntimeError(f"Notification channel is not currently configured: {row.channel}")
             if row.channel == "smtp":
                 _send_smtp(row.payload)
             elif row.channel == "ntfy":

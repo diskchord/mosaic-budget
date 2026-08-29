@@ -27,6 +27,7 @@ from ..models import (
 from ..security import decrypt_secret
 from ..utils import ensure_utc, normalize_description, parse_decimal, sanitize_message, stable_hash, utcnow
 from .audit import write_audit
+from .balance_alerts import evaluate_balance_alerts
 from .notifications import open_incident, resolve_incident
 from .rules import apply_rules_to_transaction
 from .simplefin import SimpleFinError, fetch_account_set
@@ -499,10 +500,12 @@ def perform_sync(connection_id: uuid.UUID) -> dict[str, int | str]:
         new_count = 0
         changed_count = 0
         seen_count = 0
+        synced_account_ids: set[uuid.UUID] = set()
         for account_data in payload.get("accounts", []):
             if not isinstance(account_data, dict):
                 continue
             account = _upsert_account(db, connection, account_data)
+            synced_account_ids.add(account.id)
             for raw_transaction in account_data.get("transactions", []) or []:
                 if not isinstance(raw_transaction, dict):
                     continue
@@ -538,6 +541,11 @@ def perform_sync(connection_id: uuid.UUID) -> dict[str, int | str]:
             connection.schedule_minute,
         )
         connection.version += 1
+        evaluate_balance_alerts(
+            db,
+            workspace_id=connection.workspace_id,
+            account_ids=synced_account_ids,
+        )
         resolve_incident(db, workspace_id=connection.workspace_id, incident_key=f"simplefin-sync:{connection.id}")
         write_audit(
             db,

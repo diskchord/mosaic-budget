@@ -80,6 +80,12 @@ For each month, the API loads all section/category identities, evaluates their e
 
 The server computes all totals. The browser formats and previews values but is not authoritative.
 
+## Analytics computation
+
+`GET /api/analytics?start_month=YYYY-MM&end_month=YYYY-MM` accepts an inclusive range, defaults to the 12 months ending in the current month, and rejects ranges longer than 120 months. It returns ordered monthly actuals, range totals and averages, categorization coverage, and per-category month series. Empty months are emitted explicitly with zero values so comparisons keep a stable timeline.
+
+Analytics uses allocation signs and Income-section identity rather than attempting to infer meaning from raw transaction signs. Unassigned transactions are reported separately and do not distort categorized income or spending. Deleted, excluded, duplicate-suppressed, and duplicate-account transactions are filtered out with the same visibility semantics as the budget.
+
 ## Synchronization lifecycle
 
 1. The worker claims a due connection using a PostgreSQL advisory lock.
@@ -92,9 +98,10 @@ The server computes all totals. The browser formats and previews values but is n
 8. It upserts institution and account observations without overwriting user account names or activation choices.
 9. It appends source versions and updates editable records only where manual locks permit. Transactions from an account marked as a duplicate are retained but flagged as duplicate-suppressed and excluded from user-facing transaction lists and budget totals.
 10. It applies deterministic rules to normal imported accounts; duplicate-suppressed transactions do not run rules or generate user-facing new-transaction counts.
-11. It records structured provider errors as persistent incidents.
-12. It commits the imported ledger, audit events, and queued notifications.
-13. It schedules the next stable polling time.
+11. It evaluates configured balance alerts for accounts observed in the synchronization.
+12. It records structured provider errors as persistent incidents.
+13. It commits the imported ledger, audit events, and queued notifications.
+14. It schedules the next stable polling time.
 
 Repeating an identical payload only updates `last_seen_batch_id`; it does not duplicate a transaction or version.
 
@@ -145,6 +152,10 @@ The browser presents a conflict choice rather than silently overwriting another 
 
 `notification_incidents` deduplicates active operational problems by a stable incident key. `notification_outbox` is a durable delivery queue. Detecting an incident and queuing its message occur in the same database transaction.
 
+`balance_alerts` stores an owner-selected account, above/below comparison, exact threshold, enabled state, and selected delivery channels. Creation and edits evaluate immediately; synchronization and manual balance mutations evaluate affected accounts in the same transaction; account/connection state changes evaluate immediately; and the worker health pass also evaluates all enabled alerts. A triggered alert reuses the incident/outbox pipeline, while a real balance recovery resolves the incident and queues a recovery message with the recovered balance. Administrative closure is silent. Duplicate, inactive, unknown-balance, paused-connection, and disconnected accounts are exposed as unavailable rather than falsely watched.
+
+Most incidents use every configured notification channel and avoid financial values. Balance alerts are an explicit opt-in exception: their incident text includes the account name, current balance, and threshold, and their outbox rows are restricted to the channels selected on that individual alert. An explicit selected-channel outbox row remains durable and retryable if that channel's deployment configuration is temporarily removed.
+
 Delivery failures increment an attempt count and receive exponential backoff. Restarting the worker does not lose pending alerts. Recovery resolves the incident and may queue a recovery notification.
 
 A failure of the entire host cannot be reported by that host. `EXTERNAL_HEARTBEAT_URL` must point to an independently monitored service for full-stack dead-man detection.
@@ -155,8 +166,9 @@ A failure of the entire host cannot be reported by that host. `EXTERNAL_HEARTBEA
 - Server-side sessions store only a SHA-256 hash of the random cookie token.
 - State-changing requests require a session-bound double-submit CSRF token.
 - Login failures are rate-limited by a keyed hash of email and source address.
+- Invalid credentials receive one generic inline error and never create a session; only authenticated requests that later receive HTTP 401 invoke the global session-ended flow.
 - Exactly one active owner is enforced by application logic and a PostgreSQL partial unique index.
-- Only the owner may create/disable users, transfer ownership, manage SimpleFIN, or view operational administration.
+- Only the owner may create/disable users, transfer ownership, manage SimpleFIN and balance alerts, or view operational administration.
 
 ## Backup verification
 

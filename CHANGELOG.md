@@ -6,13 +6,19 @@
 - Added the Compose backup runner with atomic dumps, isolated restore verification, safe overlap locking, verified-backup records, retries, and retention
 - Replaced the inconsistent chart/mask branding with one polished mosaic-style vector mark across the app, favicon, and PWA
 - Corrected topbar grid placement and responsive page-header spacing
+- Added an **Analytics** view and authenticated range API for comparing monthly income, spending, net cash flow, transaction coverage, and category activity across an inclusive range
+- Added owner-managed account balance thresholds with per-alert delivery through configured SMTP2GO/email and/or ntfy channels, including one-time trigger and recovery notifications
+- Kept invalid-credential responses in the sign-in form without also presenting the global expired-session message
 - Added a selected-month **Run rules** action that processes only transactions still waiting to be sorted
+- Prevented stale browser snapshots from leaving categorized transactions in **To sort**, and made rule results distinguish successfully sorted transactions from matching transactions that remain unsorted
+- Added conservative recipient-first titles for noisy SimpleFIN ACH descriptions while retaining the complete imported text and existing rule behavior
 - Added reversible duplicate SimpleFIN account marking so duplicate-feed transactions do not appear or affect the budget while source history remains intact
-- Added desktop and touch-friendly inbox multi-selection, group drag-and-drop, an accessible **Assign selected...** action, and atomic batch assignment with group Undo
+- Added desktop and touch-friendly inbox multi-selection, group drag-and-drop, an accessible **Assign selected...** action, and atomic batch assignment with group Undo; after a drop, the tray now returns smoothly and remains open on the next transaction
 - Added atomic multi-transaction editing for category, review, and budget-inclusion changes from the Transactions list
-- Added editable names for manual and SimpleFIN accounts, preserved those names across synchronization, resolved account-based rule summaries to readable names, and moved duplicate feeds out of the regular account list into a muted connection-manager state
+- Added editable names for manual and SimpleFIN accounts, preserved those names across synchronization, resolved account-based rule summaries to readable names, moved inactive and duplicate accounts out of the regular account list into a muted connection-management state, and made connection account-list saves atomic
 - Refined income progress wording, category drop-target padding, icon spacing, month-arrow alignment, transaction selection affordances, and desktop branding
 - Added Alembic revision `0003_duplicate_accounts`
+- Added Alembic revision `0004_balance_alerts`
 
 ## 0.2.0 - 2026-08-27
 

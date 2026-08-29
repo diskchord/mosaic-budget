@@ -517,6 +517,31 @@ class NotificationOutbox(Base, UUIDMixin):
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class BalanceAlert(Base, UUIDMixin, TimestampMixin, VersionMixin):
+    __tablename__ = "balance_alerts"
+    __table_args__ = (
+        CheckConstraint("comparison IN ('below', 'above')", name="balance_alert_comparison_valid"),
+        Index("ix_balance_alerts_workspace_enabled", "workspace_id", "enabled"),
+        Index(
+            "ix_balance_alerts_workspace_account_enabled",
+            "workspace_id",
+            "account_id",
+            "enabled",
+        ),
+    )
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False)
+    account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    comparison: Mapped[str] = mapped_column(String(12), nullable=False)
+    threshold: Mapped[Decimal] = mapped_column(MONEY, nullable=False)
+    channels: Mapped[list[str]] = mapped_column(JSONType, nullable=False, default=list, server_default="[]")
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+
+    account: Mapped[Account] = relationship()
+
+
 class WorkerHeartbeat(Base):
     __tablename__ = "worker_heartbeats"
 

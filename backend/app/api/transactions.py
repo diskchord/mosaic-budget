@@ -21,6 +21,7 @@ from ..schemas import (
     TransactionUpdateRequest,
 )
 from ..services.audit import write_audit
+from ..services.balance_alerts import evaluate_balance_alerts
 from ..services.budgets import serialize_transaction
 from ..services.structure import category_visible_in_month
 from ..utils import money_str, next_month, parse_decimal, parse_month, utcnow
@@ -62,6 +63,43 @@ def _transaction_for_user(
     if not transaction:
         raise HTTPException(status_code=404, detail="Transaction not found")
     return transaction
+
+
+def _lock_account_before_manual_transaction(
+    db: Session,
+    transaction_id: uuid.UUID,
+    workspace_id: uuid.UUID,
+) -> Account | None:
+    """Lock a manual transaction's account before locking the transaction.
+
+    Manual creates and account-management changes already lock accounts first.
+    Keeping that order here serializes balance deltas from different
+    transactions without introducing an account/transaction deadlock.
+    """
+    transaction_identity = db.execute(
+        select(BudgetTransaction.account_id, BudgetTransaction.source_kind).where(
+            BudgetTransaction.id == transaction_id,
+            BudgetTransaction.workspace_id == workspace_id,
+            BudgetTransaction.suppressed_by_duplicate_account.is_(False),
+            BudgetTransaction.account.has(Account.is_duplicate.is_(False)),
+        )
+    ).one_or_none()
+    if transaction_identity is None:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    if transaction_identity.source_kind != "manual":
+        return None
+    account = db.scalar(
+        select(Account)
+        .where(
+            Account.id == transaction_identity.account_id,
+            Account.workspace_id == workspace_id,
+            Account.is_duplicate.is_(False),
+        )
+        .with_for_update()
+    )
+    if account is None:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    return account
 
 
 def _conflict(transaction: BudgetTransaction, message: str = "This transaction changed on another device") -> None:
@@ -317,6 +355,12 @@ def create_manual_transaction(
         account.available_balance = account.balance
         account.version += 1
     db.flush()
+    if account.source_type == "manual":
+        evaluate_balance_alerts(
+            db,
+            workspace_id=auth.user.workspace_id,
+            account_ids={account.id},
+        )
     write_audit(
         db,
         workspace_id=auth.user.workspace_id,
@@ -537,7 +581,7 @@ def update_transaction(
     if transaction.version != payload.version:
         _conflict(transaction)
     before = serialize_transaction(transaction)
-    if payload.payee is not None:
+    if payload.payee is not None and payload.payee.strip() != transaction.payee:
         transaction.payee = payload.payee.strip()
         transaction.manual_payee_lock = True
     date_changed = payload.effective_date is not None and payload.effective_date != transaction.effective_date
@@ -595,6 +639,7 @@ def delete_transaction(
     auth: AuthContext = Depends(require_write),
     db: Session = Depends(get_db),
 ) -> dict:
+    locked_account = _lock_account_before_manual_transaction(db, transaction_id, auth.user.workspace_id)
     transaction = _transaction_for_user(db, transaction_id, auth.user.workspace_id, lock=True)
     if transaction.version != payload.version:
         _conflict(transaction)
@@ -610,10 +655,16 @@ def delete_transaction(
     transaction.deleted_at = utcnow()
     transaction.deleted_by_id = auth.user.id
     transaction.version += 1
-    if transaction.source_kind == "manual" and transaction.account.source_type == "manual":
-        transaction.account.balance = Decimal(transaction.account.balance or 0) - Decimal(transaction.amount)
-        transaction.account.available_balance = transaction.account.balance
-        transaction.account.version += 1
+    if locked_account is not None and locked_account.source_type == "manual":
+        locked_account.balance = Decimal(locked_account.balance or 0) - Decimal(transaction.amount)
+        locked_account.available_balance = locked_account.balance
+        locked_account.version += 1
+        db.flush()
+        evaluate_balance_alerts(
+            db,
+            workspace_id=auth.user.workspace_id,
+            account_ids={transaction.account_id},
+        )
     write_audit(
         db,
         workspace_id=auth.user.workspace_id,
@@ -635,6 +686,7 @@ def restore_transaction(
     auth: AuthContext = Depends(require_write),
     db: Session = Depends(get_db),
 ) -> dict:
+    locked_account = _lock_account_before_manual_transaction(db, transaction_id, auth.user.workspace_id)
     transaction = _transaction_for_user(db, transaction_id, auth.user.workspace_id, lock=True)
     if transaction.version != version:
         _conflict(transaction)
@@ -644,10 +696,16 @@ def restore_transaction(
     transaction.deleted_at = None
     transaction.deleted_by_id = None
     transaction.version += 1
-    if transaction.source_kind == "manual" and transaction.account.source_type == "manual":
-        transaction.account.balance = Decimal(transaction.account.balance or 0) + Decimal(transaction.amount)
-        transaction.account.available_balance = transaction.account.balance
-        transaction.account.version += 1
+    if locked_account is not None and locked_account.source_type == "manual":
+        locked_account.balance = Decimal(locked_account.balance or 0) + Decimal(transaction.amount)
+        locked_account.available_balance = locked_account.balance
+        locked_account.version += 1
+        db.flush()
+        evaluate_balance_alerts(
+            db,
+            workspace_id=auth.user.workspace_id,
+            account_ids={transaction.account_id},
+        )
     write_audit(
         db,
         workspace_id=auth.user.workspace_id,

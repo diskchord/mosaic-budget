@@ -16,6 +16,13 @@ const state = {
   rules: [],
   users: [],
   incidents: [],
+  balanceAlerts: [],
+  analytics: null,
+  analyticsStart: null,
+  analyticsEnd: null,
+  analyticsCompareA: null,
+  analyticsCompareB: null,
+  analyticsLoadSequence: 0,
   operations: null,
   trayOpen: false,
   selectedTransactionIds: new Set(),
@@ -25,6 +32,7 @@ const state = {
   assignmentInFlight: false,
   modalOpen: false,
   formDirty: false,
+  budgetLoadSequence: 0,
   eventSource: null,
   eventReloadTimer: null,
 };
@@ -36,6 +44,7 @@ const MAX_BULK_TRANSACTIONS = 200;
 const ICONS = {
   budget: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 19V9M10 19V4M16 19v-7M22 19H2"/></svg>',
   transactions: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M7 7h11l-3-3M17 17H6l3 3M18 7l-3 3M6 17l3-3"/></svg>',
+  analytics: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V11M10 19V5M16 19v-6M22 19H2"/><path d="m4 7 5-3 6 4 5-5"/></svg>',
   rules: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M7 12h10M10 18h4"/><circle cx="7" cy="6" r="2" fill="currentColor" stroke="none"/><circle cx="17" cy="12" r="2" fill="currentColor" stroke="none"/><circle cx="10" cy="18" r="2" fill="currentColor" stroke="none"/></svg>',
   more: '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>',
   inbox: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 4h16v14H4zM4 14h5l2 3h2l2-3h5"/></svg>',
@@ -74,6 +83,10 @@ function escapeHtml(value) {
     .replaceAll('"', '&quot;').replaceAll("'", '&#039;');
 }
 
+function transactionLabel(transaction) {
+  return transaction.display_payee || transaction.payee || transaction.imported_description || 'Transaction';
+}
+
 function getCookie(name) {
   const prefix = `${name}=`;
   return document.cookie.split(';').map(v => v.trim()).find(v => v.startsWith(prefix))?.slice(prefix.length) || '';
@@ -97,7 +110,8 @@ async function api(path, options = {}) {
   const type = response.headers.get('content-type') || '';
   if (type.includes('json')) payload = await response.json();
   else payload = await response.text();
-  if (response.status === 401) {
+  if (response.status === 401 && path !== '/api/auth/login') {
+    state.me = null;
     showLogin();
     throw new ApiError('Your session has ended. Sign in again.', 401, payload);
   }
@@ -208,7 +222,10 @@ function openModal({ title, body, footer = '', className = '', onMount = null })
   document.addEventListener('keydown', modalEscape, { once: true });
   hydrateIcons(root);
   if (onMount) onMount(root);
-  setTimeout(() => $('input, select, textarea, button', $('.modal-body', root))?.focus(), 20);
+  const modalBody = $('.modal-body', root);
+  setTimeout(() => {
+    if (modalBody?.isConnected) $('input, select, textarea, button', modalBody)?.focus();
+  }, 20);
   return root;
 }
 
@@ -302,8 +319,9 @@ function syncPill() {
 function updateNavigation() {
   $$('.nav-item').forEach(item => item.classList.toggle('active', item.dataset.view === state.view));
   $('#month-control').classList.toggle('hidden', !['budget', 'transactions', 'rules'].includes(state.view));
-  $('#inbox-button').classList.toggle('hidden', !state.budget?.unassigned?.length || state.view !== 'budget');
-  $('#inbox-count').textContent = state.budget?.unassigned?.length || 0;
+  const unsortedCount = trayTransactions().length;
+  $('#inbox-button').classList.toggle('hidden', !unsortedCount || state.view !== 'budget');
+  $('#inbox-count').textContent = unsortedCount;
 }
 
 async function setView(view) {
@@ -313,7 +331,7 @@ async function setView(view) {
   if (view !== 'transactions') state.transactionCategory = null;
   updateNavigation();
   await renderCurrentView();
-  $('#app-view').focus({ preventScroll: true });
+  if (state.view === view) $('#app-view').focus({ preventScroll: true });
 }
 
 function loadingView() {
@@ -321,32 +339,39 @@ function loadingView() {
 }
 
 async function loadBudget({ silent = false } = {}) {
+  const sequence = ++state.budgetLoadSequence;
+  const requestedMonth = state.month;
   if (!silent) loadingView();
-  state.budget = await api(`/api/budget?month=${encodeURIComponent(state.month)}`);
+  const budget = await api(`/api/budget?month=${encodeURIComponent(requestedMonth)}`);
+  if (sequence !== state.budgetLoadSequence || requestedMonth !== state.month) return false;
+  state.budget = budget;
   $('#month-label').textContent = monthLabel(state.month);
   syncPill();
   updateNavigation();
   renderTray();
+  return true;
 }
 
 async function refreshCurrentView() {
   try {
-    await loadBudget({ silent: true });
+    if (!await loadBudget({ silent: true })) return;
     await renderCurrentView({ skipBudgetLoad: true });
   } catch (error) { if (error.status !== 401) toast(error.message, 'error'); }
 }
 
 async function renderCurrentView({ skipBudgetLoad = false } = {}) {
+  const requestedView = state.view;
   try {
-    if (!state.budget && !skipBudgetLoad) await loadBudget();
+    if (!state.budget && !skipBudgetLoad && !await loadBudget()) return;
     if (state.view === 'budget') renderBudget();
     else if (state.view === 'transactions') await renderTransactions();
+    else if (state.view === 'analytics') await renderAnalytics();
     else if (state.view === 'rules') await renderRules();
     else await renderMore();
     updateNavigation();
     hydrateIcons($('#app-view'));
   } catch (error) {
-    if (error.status !== 401) {
+    if (error.status !== 401 && state.view === requestedView) {
       $('#app-view').innerHTML = `<div class="empty-state"><strong>Unable to load this screen</strong>${escapeHtml(error.message)}</div>`;
       toast(error.message, 'error');
     }
@@ -488,6 +513,179 @@ function renderBudget() {
   $$('.manage-hidden-structure', $('#app-view')).forEach(button => button.addEventListener('click', openHiddenStructureManager));
   $('.add-manual', $('#app-view')).addEventListener('click', openManualTransaction);
   installBubbleDrag();
+}
+
+function analyticsCategoryAmount(category, month) {
+  return category.months.find(item => item.month === month)?.amount || '0';
+}
+
+function analyticsDeltaMarkup(currentValue, baselineValue, { lowerIsBetter = false } = {}) {
+  const current = toUnits(currentValue);
+  const baseline = toUnits(baselineValue);
+  const delta = current - baseline;
+  if (delta === 0n) return '<span class="analytics-delta neutral">No change</span>';
+  const improved = lowerIsBetter ? delta < 0n : delta > 0n;
+  return `<span class="analytics-delta ${improved ? 'positive' : 'warning'}">${escapeHtml(money(unitsToString(delta), { plus: true }))} · ${delta > 0n ? 'higher' : 'lower'}</span>`;
+}
+
+async function renderAnalytics() {
+  state.analyticsEnd ||= state.month;
+  state.analyticsStart ||= addMonths(state.analyticsEnd, -11);
+  const requestedStart = state.analyticsStart;
+  const requestedEnd = state.analyticsEnd;
+  const sequence = ++state.analyticsLoadSequence;
+  if (!state.analytics) loadingView();
+  const data = await api(`/api/analytics?start_month=${encodeURIComponent(requestedStart)}&end_month=${encodeURIComponent(requestedEnd)}`);
+  if (sequence !== state.analyticsLoadSequence || state.view !== 'analytics') return;
+  state.analytics = data;
+  state.analyticsStart = data.start_month;
+  state.analyticsEnd = data.end_month;
+  paintAnalytics();
+}
+
+function paintAnalytics() {
+  const data = state.analytics;
+  if (!data) return;
+  const months = data.months;
+  const monthKeys = months.map(item => item.month);
+  const latestMonth = monthKeys.at(-1);
+  const previousMonth = monthKeys.at(-2) || latestMonth;
+  if (!monthKeys.includes(state.analyticsCompareA)) state.analyticsCompareA = previousMonth;
+  if (!monthKeys.includes(state.analyticsCompareB)) state.analyticsCompareB = latestMonth;
+  const compareA = months.find(item => item.month === state.analyticsCompareA) || months[0];
+  const compareB = months.find(item => item.month === state.analyticsCompareB) || months.at(-1);
+  const maximum = months.reduce((value, item) => {
+    const income = toUnits(item.income); const spending = toUnits(item.spending);
+    const absoluteIncome = income < 0n ? -income : income;
+    const absoluteSpending = spending < 0n ? -spending : spending;
+    return absoluteIncome > value ? absoluteIncome : absoluteSpending > value ? absoluteSpending : value;
+  }, 1n);
+  const barHeight = value => {
+    let units = toUnits(value); if (units < 0n) units = -units;
+    if (units === 0n) return 0;
+    return Math.max(4, Number(units * 1000n / maximum) / 10);
+  };
+  const shortMonth = month => {
+    const [year, number] = month.split('-').map(Number);
+    return new Intl.DateTimeFormat(undefined, { month: 'short' }).format(new Date(year, number - 1, 1));
+  };
+  const rangeMonthCount = months.length;
+  const compareOptions = monthKeys.map(month => `<option value="${month}" ${month === state.analyticsCompareA ? 'selected' : ''}>${escapeHtml(monthLabel(month))}</option>`).join('');
+  const compareBOptions = monthKeys.map(month => `<option value="${month}" ${month === state.analyticsCompareB ? 'selected' : ''}>${escapeHtml(monthLabel(month))}</option>`).join('');
+  const chartColumns = months.map(item => {
+    const [year] = item.month.split('-');
+    return `<div class="analytics-chart-month" title="${escapeHtml(`${monthLabel(item.month)}: ${money(item.income)} income, ${money(item.spending)} spending`)}">
+      <div class="analytics-bars" aria-hidden="true"><i class="analytics-bar income" style="--bar-height:${barHeight(item.income)}%"></i><i class="analytics-bar spending" style="--bar-height:${barHeight(item.spending)}%"></i></div>
+      <strong>${escapeHtml(shortMonth(item.month))}</strong><small>${escapeHtml(year)}</small>
+      <span class="sr-only">${escapeHtml(`${monthLabel(item.month)}, income ${money(item.income)}, spending ${money(item.spending)}, net ${money(item.net)}`)}</span>
+    </div>`;
+  }).join('');
+  const monthRows = [...months].reverse().map(item => `<tr>
+    <th scope="row">${escapeHtml(monthLabel(item.month))}</th>
+    <td class="money-cell ${toUnits(item.income) < 0n ? 'danger' : 'positive'}">${money(item.income)}</td>
+    <td class="money-cell">${money(item.spending)}</td>
+    <td class="money-cell ${toUnits(item.net) < 0n ? 'danger' : 'positive'}">${money(item.net)}</td>
+    <td class="count-cell">${item.transaction_count}</td>
+    <td class="count-cell">${item.uncategorized_transaction_count ? `<span class="pill warning">${item.uncategorized_transaction_count}</span>` : '0'}</td>
+  </tr>`).join('');
+  const categoryRows = data.categories.filter(category => (
+    toUnits(analyticsCategoryAmount(category, compareA.month)) !== 0n
+    || toUnits(analyticsCategoryAmount(category, compareB.month)) !== 0n
+  )).map(category => {
+    const first = analyticsCategoryAmount(category, compareA.month);
+    const second = analyticsCategoryAmount(category, compareB.month);
+    const delta = toUnits(second) - toUnits(first);
+    const improved = category.is_income ? delta > 0n : delta < 0n;
+    const deltaClass = delta === 0n ? 'neutral' : improved ? 'positive' : 'warning';
+    return `<tr>
+      <th scope="row"><strong>${escapeHtml(category.name)}</strong><small>${escapeHtml(category.section_name)}</small></th>
+      <td class="money-cell">${money(first)}</td>
+      <td class="money-cell">${money(second)}</td>
+      <td class="money-cell"><span class="analytics-delta ${deltaClass}">${delta === 0n ? '—' : escapeHtml(money(unitsToString(delta), { plus: true }))}</span></td>
+    </tr>`;
+  }).join('');
+  const unsortedCount = data.totals.uncategorized_transaction_count;
+  const reviewMonth = [...months].reverse().find(item => item.uncategorized_transaction_count)?.month || null;
+
+  $('#app-view').innerHTML = `
+    <header class="view-header analytics-heading"><div><h1>Analytics</h1><p>See your actual income and spending over time, then compare any two months.</p></div></header>
+    <section class="analytics-range-card" aria-labelledby="analytics-range-title">
+      <form id="analytics-range-form" class="analytics-range-form">
+        <div><h2 id="analytics-range-title">Date range</h2><p>${rangeMonthCount} month${rangeMonthCount === 1 ? '' : 's'} · ${escapeHtml(monthLabel(data.start_month))} – ${escapeHtml(monthLabel(data.end_month))}</p></div>
+        <label>From<input id="analytics-start" type="month" value="${escapeHtml(data.start_month)}" required></label>
+        <label>Through<input id="analytics-end" type="month" value="${escapeHtml(data.end_month)}" required></label>
+        <button class="button button--primary" type="submit">Apply</button>
+      </form>
+      <div class="analytics-presets" aria-label="Date range presets"><span>Quick range</span><button class="button button--ghost analytics-preset" data-months="3" type="button">3 months</button><button class="button button--ghost analytics-preset" data-months="6" type="button">6 months</button><button class="button button--ghost analytics-preset" data-months="12" type="button">12 months</button></div>
+    </section>
+    <section class="analytics-kpis" aria-label="Range summary">
+      <article><span>Total income</span><strong class="${toUnits(data.totals.income) < 0n ? 'danger' : 'positive'}">${money(data.totals.income)}</strong><small>${money(data.totals.average_income)} monthly average</small></article>
+      <article><span>Total spending</span><strong>${money(data.totals.spending)}</strong><small>${money(data.totals.average_spending)} monthly average</small></article>
+      <article><span>Net cash flow</span><strong class="${toUnits(data.totals.net) < 0n ? 'danger' : 'positive'}">${money(data.totals.net)}</strong><small>${money(data.totals.average_net)} monthly average</small></article>
+      <article><span>Transactions</span><strong>${data.totals.transaction_count}</strong><small>${data.totals.categorized_transaction_count} categorized</small></article>
+    </section>
+    ${unsortedCount ? `<aside class="analytics-notice"><span><strong>${unsortedCount} transaction${unsortedCount === 1 ? '' : 's'} still need${unsortedCount === 1 ? 's' : ''} a category.</strong><small>The ${money(data.totals.uncategorized_net)} net amount is disclosed here but excluded from income and spending totals.</small></span><button class="button button--soft analytics-review-unsorted" type="button">Review ${escapeHtml(monthLabel(reviewMonth))}</button></aside>` : ''}
+    <section class="analytics-panel">
+      <header><div><h2>Income and spending by month</h2><p>Bars share one scale; exact amounts are listed below.</p></div><div class="analytics-legend"><span><i class="income"></i>Income</span><span><i class="spending"></i>Spending</span></div></header>
+      <div class="analytics-chart-scroll"><div class="analytics-chart" role="img" aria-label="Monthly income and spending from ${escapeHtml(monthLabel(data.start_month))} through ${escapeHtml(monthLabel(data.end_month))}">${chartColumns}</div></div>
+    </section>
+    <section class="analytics-panel">
+      <header><div><h2>Compare months</h2><p>The second month is compared with the first.</p></div><div class="analytics-compare-controls"><label>First<select id="analytics-compare-a">${compareOptions}</select></label><span aria-hidden="true">→</span><label>Second<select id="analytics-compare-b">${compareBOptions}</select></label></div></header>
+      <div class="analytics-comparison-grid">
+        <article><span>Income in ${escapeHtml(monthLabel(compareB.month))}</span><strong class="${toUnits(compareB.income) < 0n ? 'danger' : 'positive'}">${money(compareB.income)}</strong>${analyticsDeltaMarkup(compareB.income, compareA.income)}</article>
+        <article><span>Spending in ${escapeHtml(monthLabel(compareB.month))}</span><strong>${money(compareB.spending)}</strong>${analyticsDeltaMarkup(compareB.spending, compareA.spending, { lowerIsBetter: true })}</article>
+        <article><span>Net in ${escapeHtml(monthLabel(compareB.month))}</span><strong class="${toUnits(compareB.net) < 0n ? 'danger' : 'positive'}">${money(compareB.net)}</strong>${analyticsDeltaMarkup(compareB.net, compareA.net)}</article>
+      </div>
+      <div class="analytics-table-wrap"><table class="analytics-table"><caption>Category comparison for ${escapeHtml(monthLabel(compareA.month))} and ${escapeHtml(monthLabel(compareB.month))}</caption><thead><tr><th scope="col">Category</th><th scope="col">${escapeHtml(monthLabel(compareA.month))}</th><th scope="col">${escapeHtml(monthLabel(compareB.month))}</th><th scope="col">Change</th></tr></thead><tbody>${categoryRows || '<tr><td colspan="4" class="analytics-empty-cell">No categorized activity in these two months.</td></tr>'}</tbody></table></div>
+    </section>
+    <section class="analytics-panel">
+      <header><div><h2>Monthly detail</h2><p>Income and spending include categorized activity only.</p></div></header>
+      <div class="analytics-table-wrap"><table class="analytics-table"><thead><tr><th scope="col">Month</th><th scope="col">Income</th><th scope="col">Spending</th><th scope="col">Net</th><th scope="col">Transactions</th><th scope="col">To sort</th></tr></thead><tbody>${monthRows}</tbody></table></div>
+    </section>`;
+
+  $('#analytics-range-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const start = $('#analytics-start').value; const end = $('#analytics-end').value;
+    if (!start || !end) { toast('Choose both ends of the analytics range.', 'error'); return; }
+    if (start > end) { toast('The start month must come before the end month.', 'error'); return; }
+    const previous = { data: state.analytics, start: state.analyticsStart, end: state.analyticsEnd, compareA: state.analyticsCompareA, compareB: state.analyticsCompareB };
+    state.analyticsStart = start; state.analyticsEnd = end; state.analytics = null;
+    state.analyticsCompareA = null; state.analyticsCompareB = null;
+    const expectedSequence = state.analyticsLoadSequence + 1;
+    try { await renderAnalytics(); }
+    catch (error) {
+      if (state.analyticsLoadSequence !== expectedSequence) return;
+      state.analytics = previous.data; state.analyticsStart = previous.start; state.analyticsEnd = previous.end;
+      state.analyticsCompareA = previous.compareA; state.analyticsCompareB = previous.compareB;
+      if (error.status !== 401 && state.view === 'analytics') { toast(error.message, 'error'); paintAnalytics(); }
+    }
+  });
+  $$('.analytics-preset', $('#app-view')).forEach(button => button.addEventListener('click', async () => {
+    const end = $('#analytics-end').value || state.analyticsEnd || state.month;
+    const previous = { data: state.analytics, start: state.analyticsStart, end: state.analyticsEnd, compareA: state.analyticsCompareA, compareB: state.analyticsCompareB };
+    state.analyticsEnd = end; state.analyticsStart = addMonths(end, -(Number(button.dataset.months) - 1)); state.analytics = null;
+    state.analyticsCompareA = null; state.analyticsCompareB = null;
+    const expectedSequence = state.analyticsLoadSequence + 1;
+    try { await renderAnalytics(); }
+    catch (error) {
+      if (state.analyticsLoadSequence !== expectedSequence) return;
+      state.analytics = previous.data; state.analyticsStart = previous.start; state.analyticsEnd = previous.end;
+      state.analyticsCompareA = previous.compareA; state.analyticsCompareB = previous.compareB;
+      if (error.status !== 401 && state.view === 'analytics') { toast(error.message, 'error'); paintAnalytics(); }
+    }
+  }));
+  $('#analytics-compare-a').addEventListener('change', event => {
+    state.analyticsCompareA = event.currentTarget.value; paintAnalytics();
+    $('#analytics-compare-a')?.focus({ preventScroll: true });
+  });
+  $('#analytics-compare-b').addEventListener('change', event => {
+    state.analyticsCompareB = event.currentTarget.value; paintAnalytics();
+    $('#analytics-compare-b')?.focus({ preventScroll: true });
+  });
+  $('.analytics-review-unsorted', $('#app-view'))?.addEventListener('click', () => {
+    state.month = reviewMonth; state.transactionStatus = 'unassigned'; state.transactionCategory = null; state.transactionSearch = '';
+    clearTransactionListSelection(); state.budget = null; setView('transactions');
+  });
 }
 
 async function toggleSectionCollapse(sectionId) {
@@ -793,7 +991,12 @@ function openCategoryEditor(categoryId = null, sectionId = null) {
 }
 
 function trayTransactions() {
-  return state.budget?.unassigned || [];
+  return (state.budget?.unassigned || []).filter(transaction => (
+    !transaction.allocations?.length
+    && !transaction.excluded
+    && !transaction.deleted_at
+    && !transaction.suppressed_by_duplicate_account
+  ));
 }
 
 function selectedTrayTransactionIds() {
@@ -874,7 +1077,7 @@ function renderTray() {
   }
   container.innerHTML = rows.map(transaction => {
     const inflow = toUnits(transaction.amount) > 0n;
-    const label = transaction.payee || transaction.imported_description || 'Transaction';
+    const label = transactionLabel(transaction);
     const description = `${label}, ${money(transaction.amount)}, ${formatDate(transaction.effective_date)}`;
     return `<article class="tx-bubble" data-transaction-id="${transaction.id}">
       <label class="tx-select-control" title="Select ${escapeHtml(label)}">
@@ -896,8 +1099,20 @@ function renderTray() {
   }
 }
 
-function openTray() {
-  if (!state.budget?.unassigned?.length) return;
+async function openTray() {
+  if (!trayTransactions().length) return;
+  const button = $('#inbox-button');
+  if (button.getAttribute('aria-busy') === 'true') return;
+  button.setAttribute('aria-busy', 'true');
+  try {
+    if (!await loadBudget({ silent: true })) return;
+  } catch (error) {
+    if (error.status !== 401) toast(`Could not refresh transactions to sort: ${error.message}`, 'error');
+    return;
+  } finally {
+    button.removeAttribute('aria-busy');
+  }
+  if (state.view !== 'budget' || !trayTransactions().length) return;
   state.trayOpen = true;
   renderTray();
   const tray = $('#transaction-tray');
@@ -946,7 +1161,7 @@ async function undoTransactionAssignment(transactions) {
   }
 }
 
-async function assignTransactions(transactionIds, categoryId) {
+async function assignTransactions(transactionIds, categoryId, { keepTrayOpen = false } = {}) {
   if (state.assignmentInFlight) return false;
   const transactions = transactionIds.map(transactionById);
   const category = categoryById(categoryId);
@@ -965,12 +1180,12 @@ async function assignTransactions(transactionIds, categoryId) {
         transactions: transactions.map(transaction => ({ id: transaction.id, version: transaction.version })),
       },
     });
-    closeTray({ restoreFocus: false });
+    if (!keepTrayOpen) closeTray({ restoreFocus: false });
     const message = transactions.length === 1
-      ? `${transactions[0].payee || 'Transaction'} assigned to ${category.name}`
+      ? `${transactionLabel(transactions[0])} assigned to ${category.name}`
       : `${transactions.length} transactions assigned to ${category.name}`;
     await refreshCurrentView();
-    $('#app-view')?.focus({ preventScroll: true });
+    if (!keepTrayOpen) $('#app-view')?.focus({ preventScroll: true });
     state.assignmentInFlight = false;
     $('#transaction-tray')?.removeAttribute('aria-busy');
     syncBubbleSelection();
@@ -1022,6 +1237,33 @@ function installBubbleDrag() {
   if (!container || container.dataset.dragInstalled === 'true') return;
   container.dataset.dragInstalled = 'true';
   let drag = null;
+
+  const waitForTrayReturn = () => {
+    const tray = $('#transaction-tray');
+    if (!tray?.classList.contains('dragging')) return Promise.resolve();
+    return new Promise(resolve => {
+      let timeout = null;
+      const done = event => {
+        if (event && (event.target !== tray || event.propertyName !== 'transform')) return;
+        tray.removeEventListener('transitionend', done);
+        clearTimeout(timeout);
+        resolve();
+      };
+      tray.addEventListener('transitionend', done);
+      timeout = setTimeout(done, 400);
+    });
+  };
+
+  const focusTrayTransactionAt = index => {
+    if (!state.trayOpen) return;
+    const rows = trayTransactions();
+    const transaction = rows[Math.min(Math.max(index, 0), rows.length - 1)];
+    const bubble = transaction
+      ? $(`.tx-bubble[data-transaction-id="${transaction.id}"]`, $('#transaction-bubbles'))
+      : null;
+    const content = bubble ? $('.tx-bubble-content', bubble) : null;
+    (content || $('#tray-close'))?.focus({ preventScroll: true });
+  };
 
   const clean = () => {
     const current = drag;
@@ -1104,7 +1346,7 @@ function installBubbleDrag() {
     drag.ghost.className = 'drag-ghost';
     drag.ghost.setAttribute('aria-hidden', 'true');
     drag.ghost.style.width = `${Math.min(210, Math.max(160, drag.rect.width))}px`;
-    drag.ghost.innerHTML = `<strong>${escapeHtml(first.payee || first.imported_description || 'Transaction')}</strong>
+    drag.ghost.innerHTML = `<strong>${escapeHtml(transactionLabel(first))}</strong>
       <span class="amount ${total > 0n ? 'inflow' : ''}">${money(unitsToString(total), { plus: true })}</span>
       <small>${transactions.length === 1 ? `${escapeHtml(first.account_name)} · ${escapeHtml(formatDate(first.effective_date))}` : `${transactions.length} transactions moving together`}</small>
       ${transactions.length > 1 ? `<span class="drag-count">${transactions.length}</span>` : ''}`;
@@ -1151,8 +1393,14 @@ function installBubbleDrag() {
     const wasActive = drag.active;
     const transactionIds = [...drag.transactionIds];
     const categoryId = drag.target?.dataset.categoryId || null;
+    const firstDraggedIndex = Math.max(0, trayTransactions().findIndex(transaction => transactionIds.includes(transaction.id)));
+    const trayReturned = wasActive ? waitForTrayReturn() : Promise.resolve();
     clean();
-    if (wasActive && categoryId) await assignTransactions(transactionIds, categoryId);
+    if (wasActive && categoryId) {
+      await assignTransactions(transactionIds, categoryId, { keepTrayOpen: true });
+      await trayReturned;
+      focusTrayTransactionAt(firstDraggedIndex);
+    }
   };
 
   container.addEventListener('click', event => {
@@ -1362,8 +1610,8 @@ function selectAllVisibleTransactions() {
 
 function transactionCard(transaction) {
   const inflow = toUnits(transaction.amount) > 0n;
-  const symbol = (transaction.payee || '?').trim().slice(0, 1).toUpperCase();
-  const label = transaction.payee || transaction.imported_description || 'Transaction';
+  const label = transactionLabel(transaction);
+  const symbol = label.trim().slice(0, 1).toUpperCase() || '?';
   const description = `${label}, ${money(transaction.amount)}, ${formatDate(transaction.effective_date)}`;
   const badges = [
     transaction.pending ? '<span class="pending-badge">Pending</span>' : '',
@@ -1550,7 +1798,7 @@ async function openTransactionEditor(transactionId) {
     title: deleted ? 'Transaction in Trash' : 'Transaction details',
     className: 'modal--wide',
     body: `<div class="transaction-hero">
-      <div><h3>${escapeHtml(transaction.payee)}</h3><p>${escapeHtml(transaction.account_name)} · ${escapeHtml(formatDate(transaction.effective_date))}${transaction.pending ? ' · Pending' : ''}</p></div>
+      <div><h3>${escapeHtml(transactionLabel(transaction))}</h3><p>${escapeHtml(transaction.account_name)} · ${escapeHtml(formatDate(transaction.effective_date))}${transaction.pending ? ' · Pending' : ''}</p></div>
       <div class="hero-amount ${inflow ? 'positive' : ''}">${money(transaction.amount, { plus: true })}</div>
     </div>
     ${deleted ? `<div class="delete-warning">Deleted ${escapeHtml(relativeTime(transaction.deleted_at))}. It is excluded from budgets and will not be recreated by synchronization.</div>` : `<form id="transaction-form" class="form-grid">
@@ -1614,15 +1862,21 @@ async function openTransactionEditor(transactionId) {
             amount: signedInputForTransaction(transaction, $('.allocation-amount', row).value),
             memo: '',
           }));
-          const updated = await withConflict(body => api(`/api/transactions/${transaction.id}`, { method: 'PATCH', body }), {
+          const body = {
             version: transaction.version,
-            payee: $('#transaction-payee', root).value.trim(),
             effective_date: $('#transaction-date', root).value,
             allocations,
             note: $('#transaction-note', root).value,
             needs_review: $('#transaction-review', root).checked,
             excluded: $('#transaction-excluded', root).checked,
-          }, 'transaction');
+          };
+          const editedPayee = $('#transaction-payee', root).value.trim();
+          if (editedPayee !== transaction.payee) body.payee = editedPayee;
+          const updated = await withConflict(
+            conflictBody => api(`/api/transactions/${transaction.id}`, { method: 'PATCH', body: conflictBody }),
+            body,
+            'transaction',
+          );
           if (!updated) return;
           state.formDirty = false; closeModal(); toast('Transaction saved'); await refreshCurrentView();
         } catch (error) { toast(error.message, 'error'); } finally { setButtonBusy(button, false); }
@@ -1758,7 +2012,10 @@ async function renderRules() {
       const scanned = run.transactions_scanned || 0;
       const changed = run.transactions_changed || 0;
       const sorted = run.transactions_sorted || 0;
-      if (sorted) toast(`Sorted ${sorted} of ${scanned} unsorted transaction${scanned === 1 ? '' : 's'} in ${monthLabel(runMonth)}`);
+      const stillUnsorted = run.transactions_still_unsorted || 0;
+      if (sorted && stillUnsorted) toast(`Sorted ${sorted} transaction${sorted === 1 ? '' : 's'}; ${stillUnsorted} matching transaction${stillUnsorted === 1 ? '' : 's'} remain${stillUnsorted === 1 ? 's' : ''} in To sort`, 'error');
+      else if (sorted) toast(`Sorted ${sorted} of ${scanned} unsorted transaction${scanned === 1 ? '' : 's'} in ${monthLabel(runMonth)}`);
+      else if (stillUnsorted) toast(`${stillUnsorted} matching transaction${stillUnsorted === 1 ? '' : 's'} could not be sorted and remain${stillUnsorted === 1 ? 's' : ''} in To sort`, 'error');
       else if (changed) toast(`Updated ${changed} unsorted transaction${changed === 1 ? '' : 's'} in ${monthLabel(runMonth)}`);
       else toast(`No matching rule changes in ${monthLabel(runMonth)}`);
       await refreshCurrentView();
@@ -1943,10 +2200,10 @@ function openRuleEditor(rule = null, transaction = null) {
   const conditions = simpleConditionsFromRule(rule, transaction);
   const actions = defaultRuleActions(rule, transaction);
   openModal({
-    title: rule ? `Edit ${rule.name}` : transaction ? `Rule for ${transaction.payee}` : 'Create a rule',
+    title: rule ? `Edit ${rule.name}` : transaction ? `Rule for ${transactionLabel(transaction)}` : 'Create a rule',
     className: 'modal--wide',
     body: `<form id="rule-form" class="rule-builder">
-      <div class="form-grid"><label>Rule name<input id="rule-name" maxlength="180" required value="${escapeHtml(rule?.name || (transaction ? `${transaction.payee} → category` : ''))}"></label><label>Phase<select id="rule-phase"><option value="cleanup" ${rule?.phase === 'cleanup' ? 'selected' : ''}>1. Clean up</option><option value="categorize" ${!rule || rule.phase === 'categorize' ? 'selected' : ''}>2. Categorize</option><option value="finish" ${rule?.phase === 'finish' ? 'selected' : ''}>3. Finish and flag</option></select></label><label>Order within phase<input id="rule-priority" type="number" min="0" max="100000" value="${rule?.priority ?? 100}"></label><label><span><input id="rule-enabled" type="checkbox" style="width:auto;min-height:auto" ${rule?.enabled !== false ? 'checked' : ''}> Rule is enabled</span></label></div>
+      <div class="form-grid"><label>Rule name<input id="rule-name" maxlength="180" required value="${escapeHtml(rule?.name || (transaction ? `${transactionLabel(transaction)} → category` : ''))}"></label><label>Phase<select id="rule-phase"><option value="cleanup" ${rule?.phase === 'cleanup' ? 'selected' : ''}>1. Clean up</option><option value="categorize" ${!rule || rule.phase === 'categorize' ? 'selected' : ''}>2. Categorize</option><option value="finish" ${rule?.phase === 'finish' ? 'selected' : ''}>3. Finish and flag</option></select></label><label>Order within phase<input id="rule-priority" type="number" min="0" max="100000" value="${rule?.priority ?? 100}"></label><label><span><input id="rule-enabled" type="checkbox" style="width:auto;min-height:auto" ${rule?.enabled !== false ? 'checked' : ''}> Rule is enabled</span></label></div>
       <section class="builder-panel"><header><div><h3>When</h3><small>Match <select id="rule-combinator" class="inline-select"><option value="all" ${rule?.conditions?.combinator !== 'any' && rule?.conditions?.combinator !== 'none' ? 'selected' : ''}>all conditions</option><option value="any" ${rule?.conditions?.combinator === 'any' ? 'selected' : ''}>any condition</option><option value="none" ${rule?.conditions?.combinator === 'none' ? 'selected' : ''}>none of these</option></select></small></div><button class="button button--soft add-condition" type="button">+ Condition</button></header><div class="builder-body condition-list">${conditions.map(conditionRowMarkup).join('')}</div></section>
       <section class="builder-panel"><header><div><h3>Then</h3><small>Actions run from top to bottom.</small></div><button class="button button--soft add-action" type="button">+ Action</button></header><div class="builder-body action-list">${actions.map(actionRowMarkup).join('')}</div></section>
       <section class="builder-panel"><div class="builder-body"><label><span><input id="rule-stop" type="checkbox" style="width:auto;min-height:auto" ${rule?.stop_processing !== false ? 'checked' : ''}> Stop other rules in this phase after a match</span></label><label><span><input id="rule-manual-overrides" type="checkbox" style="width:auto;min-height:auto" ${rule?.apply_to_manual_overrides ? 'checked' : ''}> Allow this rule to overwrite a person's manual category or payee</span></label><label>When saving<select id="rule-apply-now"><option value="none">Future transactions only</option><option value="unassigned">Also apply to existing unassigned transactions</option><option value="eligible">Apply to every eligible historical transaction</option></select></label><div class="preview-box rule-preview">Preview has not been run.</div><button class="button button--soft preview-rule" type="button">Preview matching transactions</button></div></section>
@@ -1970,7 +2227,7 @@ function openRuleEditor(rule = null, transaction = null) {
         body.apply_now = 'none'; setButtonBusy(event.currentTarget, true, 'Checking…');
         try {
           const result = await api('/api/rules/preview', { method: 'POST', body });
-          $('.rule-preview', root).innerHTML = `<strong>${result.match_count_in_sample} matches</strong> in the newest ${result.sample_size} transactions.${result.transactions.length ? `<div style="margin-top:8px">${result.transactions.slice(0,5).map(item => `${escapeHtml(item.payee)} · ${money(item.amount)}`).join('<br>')}</div>` : ''}`;
+          $('.rule-preview', root).innerHTML = `<strong>${result.match_count_in_sample} matches</strong> in the newest ${result.sample_size} transactions.${result.transactions.length ? `<div style="margin-top:8px">${result.transactions.slice(0,5).map(item => `${escapeHtml(transactionLabel(item))} · ${money(item.amount)}`).join('<br>')}</div>` : ''}`;
         } catch (error) { toast(error.message, 'error'); } finally { setButtonBusy(event.currentTarget, false); }
       });
       $('.archive-rule', root)?.addEventListener('click', async () => {
@@ -1988,7 +2245,12 @@ function openRuleEditor(rule = null, transaction = null) {
           if (!result) return;
           state.formDirty = false; closeModal();
           const changed = result.historical_transactions_changed || 0;
-          toast(changed ? `Rule saved and applied to ${changed} transactions` : 'Rule saved');
+          const sorted = result.historical_transactions_sorted || 0;
+          const stillUnsorted = result.historical_transactions_still_unsorted || 0;
+          if (sorted && stillUnsorted) toast(`Rule saved: ${sorted} transaction${sorted === 1 ? '' : 's'} sorted; ${stillUnsorted} remain${stillUnsorted === 1 ? 's' : ''} in To sort`, 'error');
+          else if (sorted) toast(`Rule saved and sorted ${sorted} transaction${sorted === 1 ? '' : 's'}`);
+          else if (stillUnsorted) toast(`Rule saved, but ${stillUnsorted} matching transaction${stillUnsorted === 1 ? '' : 's'} remain${stillUnsorted === 1 ? 's' : ''} in To sort`, 'error');
+          else toast(changed ? `Rule saved and updated ${changed} transaction${changed === 1 ? '' : 's'}` : 'Rule saved');
           await refreshCurrentView(); if (state.view === 'rules') await renderRules();
         } catch (error) { toast(error.message, 'error'); } finally { setButtonBusy(button, false); }
       };
@@ -2019,26 +2281,54 @@ function connectionHealthMarkup(connection) {
 async function renderMore() {
   const admin = state.me.user.is_admin;
   const requests = [api('/api/connections'), api('/api/system/status')];
-  if (admin) requests.push(api('/api/admin/users'), api('/api/admin/incidents'), api('/api/admin/operations'));
+  if (admin) requests.push(
+    api('/api/admin/users'),
+    api('/api/admin/incidents'),
+    api('/api/admin/operations'),
+    api('/api/alerts/balances'),
+  );
   const results = await Promise.all(requests);
   const connections = results[0].connections;
   const system = results[1];
   if (admin) {
-    state.users = results[2].users; state.incidents = results[3].incidents; state.operations = results[4];
+    state.users = results[2].users;
+    state.incidents = results[3].incidents.filter(incident => !incident.incident_key.startsWith('balance-alert:'));
+    state.operations = results[4];
+    state.balanceAlerts = results[5].alerts;
   }
   const themes = state.me.themes || Object.keys(THEME_META);
   const channelLabels = [state.me.notification_channels.smtp ? 'SMTP' : '', state.me.notification_channels.ntfy ? 'ntfy' : '', state.me.notification_channels.external_heartbeat ? 'external heartbeat' : ''].filter(Boolean);
+  const balanceChannels = admin ? results[5].available_channels : [];
+  const balanceAlertCards = state.balanceAlerts.map(alert => {
+    const condition = alert.comparison === 'below' ? 'Below' : 'Above';
+    const delivery = alert.channels.map(channel => channel === 'smtp' ? 'SMTP2GO' : 'ntfy').join(' + ');
+    const unavailableLabels = {
+      duplicate_account: 'Duplicate account',
+      inactive_account: 'Inactive account',
+      balance_unavailable: 'Balance unavailable',
+      connection_unavailable: 'Connection unavailable',
+    };
+    const status = !alert.available ? 'Unavailable' : !alert.enabled ? 'Paused' : alert.triggered ? 'Triggered' : 'Watching';
+    const balance = alert.current_balance === null ? 'Current balance unavailable' : `Current ${money(alert.current_balance)}`;
+    const availability = alert.available ? '' : ` · ${unavailableLabels[alert.unavailable_reason] || 'Account unavailable'}`;
+    const deliveryAvailability = alert.channels.some(channel => !balanceChannels.includes(channel)) ? ' · Delivery channel not configured' : '';
+    const statusClass = alert.triggered ? 'warning' : alert.available && alert.enabled ? 'positive' : '';
+    return `<div class="connection-card balance-alert-card ${alert.triggered ? 'balance-alert-card--triggered' : ''} ${!alert.available ? 'balance-alert-card--unavailable' : ''}" data-alert-id="${alert.id}"><div class="connection-top"><div><strong>${escapeHtml(alert.name)}</strong><small>${escapeHtml(alert.account_name)} · ${condition} ${money(alert.threshold)} · ${escapeHtml(balance)} · ${escapeHtml(delivery)}${escapeHtml(availability)}${escapeHtml(deliveryAvailability)}</small></div><div class="account-card-actions"><span class="pill ${statusClass}">${status}</span><button class="icon-button edit-balance-alert" type="button" aria-label="Edit ${escapeHtml(alert.name)}"><span data-icon="pencil"></span></button></div></div></div>`;
+  }).join('');
   const allAccounts = accountCatalog();
   const duplicateAccountCount = allAccounts.filter(account => account.is_duplicate).length;
-  const accountCards = allAccounts.filter(account => !account.is_duplicate).map(account => {
-    const status = `${account.is_budget ? 'On budget' : 'Off budget'}${account.is_active ? '' : ' · Inactive'}`;
+  const inactiveAccountCount = allAccounts.filter(account => !account.is_duplicate && !account.is_active).length;
+  const hiddenAccountCount = duplicateAccountCount + inactiveAccountCount;
+  const accountCards = allAccounts.filter(account => account.is_active && !account.is_duplicate).map(account => {
+    const status = account.is_budget ? 'On budget' : 'Off budget';
     return `<div class="connection-card" data-account-id="${account.id}"><div class="connection-top"><div><strong>${escapeHtml(account.name)}</strong><small>${escapeHtml(account.source_type === 'manual' ? 'Manual account' : 'SimpleFIN account')} · ${escapeHtml(status)}</small></div><div class="account-card-actions"><b>${money(account.balance)}</b>${admin ? `<button class="icon-button edit-account-name" type="button" aria-label="Rename ${escapeHtml(account.name)}"><span data-icon="pencil"></span></button>` : ''}</div></div></div>`;
   }).join('');
-  const duplicateAccountNote = duplicateAccountCount
-    ? ` ${duplicateAccountCount} duplicate account${duplicateAccountCount === 1 ? ' is' : 's are'} hidden here and ${admin ? 'can be managed' : 'remain visible'} inside the relevant bank connection.`
-    : '';
-  const emptyAccounts = duplicateAccountCount
-    ? `<div class="empty-state"><strong>No regular accounts shown</strong>${duplicateAccountCount} duplicate account${duplicateAccountCount === 1 ? ' is' : 's are'} ${admin ? 'available to manage' : 'still visible'} from the relevant bank connection.</div>`
+  const hiddenAccountNote = [
+    duplicateAccountCount ? `${duplicateAccountCount} duplicate account${duplicateAccountCount === 1 ? ' is' : 's are'} hidden here.` : '',
+    inactiveAccountCount ? `${inactiveAccountCount} inactive account${inactiveAccountCount === 1 ? ' is' : 's are'} hidden here.` : '',
+  ].filter(Boolean).join(' ');
+  const emptyAccounts = hiddenAccountCount
+    ? `<div class="empty-state"><strong>No accounts to show</strong>${hiddenAccountCount} account${hiddenAccountCount === 1 ? ' is' : 's are'} inactive or duplicate and hidden from this list.</div>`
     : '<div class="empty-state"><strong>No accounts yet</strong>Connect a bank or add a manual transaction after an account is available.</div>';
   $('#app-view').innerHTML = `<header class="view-header"><div><h1>More</h1><p>Appearance, bank connections, people, and system reliability.</p></div></header>
     <div class="settings-grid">
@@ -2049,9 +2339,10 @@ async function renderMore() {
       <section class="settings-card"><header><div><h2>Bank connections</h2><p>SimpleFIN imports continue in the background; opening this page does not trigger a bank request.</p></div>${admin ? '<button class="button button--primary add-connection" type="button">+ Connect</button>' : ''}</header>
         <div class="connection-list">${connections.map(connection => `<div class="connection-card" data-connection-id="${connection.id}"><div class="connection-top"><div><strong>${escapeHtml(connection.name)}</strong><small>Every ${connection.sync_interval_minutes / 60} hours · Next ${escapeHtml(relativeTime(connection.next_sync_at))}</small></div><button class="icon-button connection-details" type="button">›</button></div><div class="health-line"><span class="status-dot"></span>${connectionHealthMarkup(connection)}</div>${connection.last_error_message ? `<p class="danger">${escapeHtml(connection.last_error_message)}</p>` : ''}</div>`).join('') || '<div class="empty-state"><strong>No bank connected</strong>Manual and cash budgeting still work. The owner can add SimpleFIN here.</div>'}</div>
       </section>
-      <section class="settings-card"><header><div><h2>Accounts</h2><p>Balances shown are the latest values retained by Mosaic.${admin ? ' Use edit to give any account a familiar name.' : ''}${escapeHtml(duplicateAccountNote)}</p></div></header>${accountCards || emptyAccounts}</section>
+      <section class="settings-card"><header><div><h2>Accounts</h2><p>Balances shown are the latest values retained by Mosaic.${admin ? ' Use edit to give any account a familiar name.' : ''}${hiddenAccountNote ? ` ${escapeHtml(hiddenAccountNote)} Imported accounts remain available inside their bank connection.` : ''}</p></div></header>${accountCards || emptyAccounts}</section>
       ${admin ? `<section class="settings-card"><header><div><h2>People</h2><p>Multiple devices can be active at once. Conflicting edits require an explicit choice.</p></div><button class="button button--soft add-user" type="button">+ User</button></header><div class="user-list">${state.users.map(user => `<div class="user-row" data-user-id="${user.id}"><div><strong>${escapeHtml(user.display_name)} ${user.is_admin ? '<span class="pill">Owner</span>' : ''}</strong><small>${escapeHtml(user.email)} · ${user.is_active ? 'Active' : 'Disabled'}</small></div><button class="icon-button edit-user" type="button">›</button></div>`).join('')}</div></section>
-      <section class="settings-card"><header><div><h2>Alerts</h2><p>${channelLabels.length ? `Delivery configured through ${escapeHtml(channelLabels.join(' and '))}.` : 'No external alert channel is currently enabled.'}</p></div><button class="button button--soft test-notifications" type="button">Send test</button></header><div class="incident-list">${state.incidents.map(incident => `<div class="incident-row"><div class="incident-top"><div><strong class="${incident.severity === 'critical' ? 'danger' : incident.severity === 'warning' ? 'warning' : ''}">${escapeHtml(incident.title)}</strong><small>${escapeHtml(relativeTime(incident.last_seen_at))} · Seen ${incident.occurrence_count} time${incident.occurrence_count === 1 ? '' : 's'}</small></div>${incident.acknowledged_at ? '<span class="pill">Acknowledged</span>' : `<button class="button button--ghost acknowledge-incident" data-incident-id="${incident.id}" type="button">Acknowledge</button>`}</div><p>${escapeHtml(incident.message)}</p></div>`).join('') || '<div class="empty-state"><strong>No open incidents</strong>Synchronization and background checks have not reported an unresolved problem.</div>'}</div></section>
+      <section class="settings-card"><header><div><h2>Balance alerts</h2><p>${balanceChannels.length ? `Notify through ${escapeHtml(balanceChannels.map(channel => channel === 'smtp' ? 'SMTP2GO' : 'ntfy').join(' and '))} when an account crosses a threshold.` : 'Configure SMTP2GO or ntfy in the deployment environment to enable balance alerts.'}</p></div><button class="button button--soft add-balance-alert" type="button" ${balanceChannels.length ? '' : 'disabled'}>+ Add alert</button></header><div class="balance-alert-list">${balanceAlertCards || '<div class="empty-state"><strong>No balance alerts</strong>Add a threshold for any active account and choose where it should be delivered.</div>'}</div></section>
+      <section class="settings-card"><header><div><h2>Operational alerts</h2><p>${channelLabels.length ? `Delivery configured through ${escapeHtml(channelLabels.join(' and '))}.` : 'No external alert channel is currently enabled.'}</p></div><button class="button button--soft test-notifications" type="button">Send test</button></header><div class="incident-list">${state.incidents.map(incident => `<div class="incident-row"><div class="incident-top"><div><strong class="${incident.severity === 'critical' ? 'danger' : incident.severity === 'warning' ? 'warning' : ''}">${escapeHtml(incident.title)}</strong><small>${escapeHtml(relativeTime(incident.last_seen_at))} · Seen ${incident.occurrence_count} time${incident.occurrence_count === 1 ? '' : 's'}</small></div>${incident.acknowledged_at ? '<span class="pill">Acknowledged</span>' : `<button class="button button--ghost acknowledge-incident" data-incident-id="${incident.id}" type="button">Acknowledge</button>`}</div><p>${escapeHtml(incident.message)}</p></div>`).join('') || '<div class="empty-state"><strong>No open incidents</strong>Synchronization and background checks have not reported an unresolved problem.</div>'}</div></section>
       <section class="settings-card"><header><div><h2>Reliability</h2><p>Worker, synchronization, and verified backup status.</p></div></header><div class="health-line"><span class="status-dot"></span><strong>${system.healthy ? 'All monitored systems healthy' : 'Attention required'}</strong></div><div class="health-line">Worker: ${state.operations.worker.healthy ? 'healthy' : 'stale'} · heartbeat ${escapeHtml(relativeTime(state.operations.worker.heartbeat_at))}</div><div class="health-line">Backup: ${state.operations.backup.verified_at ? `verified ${escapeHtml(relativeTime(state.operations.backup.verified_at))}` : 'not yet verified'}</div><div class="health-line">Sync: ${escapeHtml(system.synchronization)} · Backup: ${escapeHtml(system.backup)}</div></section>` : ''}
     </div>`;
   hydrateIcons($('#app-view'));
@@ -2065,12 +2356,99 @@ async function renderMore() {
   $$('.edit-account-name', $('#app-view')).forEach(button => button.addEventListener('click', () => openAccountNameEditor(accountById(button.closest('.connection-card').dataset.accountId))));
   $('.add-user', $('#app-view'))?.addEventListener('click', () => openUserEditor());
   $$('.edit-user', $('#app-view')).forEach(button => button.addEventListener('click', () => openUserEditor(state.users.find(user => user.id === button.closest('.user-row').dataset.userId))));
+  $('.add-balance-alert', $('#app-view'))?.addEventListener('click', () => openBalanceAlertEditor(null, balanceChannels));
+  $$('.edit-balance-alert', $('#app-view')).forEach(button => button.addEventListener('click', () => openBalanceAlertEditor(state.balanceAlerts.find(alert => alert.id === button.closest('.balance-alert-card').dataset.alertId), balanceChannels)));
   $$('.acknowledge-incident', $('#app-view')).forEach(button => button.addEventListener('click', async () => {
     try { await api(`/api/admin/incidents/${button.dataset.incidentId}/acknowledge`, { method: 'POST', body: { acknowledged: true } }); toast('Incident acknowledged'); await renderMore(); } catch (error) { toast(error.message, 'error'); }
   }));
   $('.test-notifications', $('#app-view'))?.addEventListener('click', async event => {
     setButtonBusy(event.currentTarget, true, 'Queueing…');
     try { await api('/api/admin/notifications/test', { method: 'POST' }); toast('Test alert queued for the background delivery worker'); } catch (error) { toast(error.message, 'error'); } finally { setButtonBusy(event.currentTarget, false); }
+  });
+}
+
+function openBalanceAlertEditor(alert = null, availableChannels = []) {
+  const accounts = accountCatalog().filter(account => account.balance_alert_available !== false && account.is_active && !account.is_duplicate && account.balance !== null);
+  if (!accounts.length && !alert) { toast('No active account with a current balance and available connection can be monitored yet.', 'error'); return; }
+  const selectedChannels = new Set(alert?.channels || availableChannels);
+  const channelOptions = [...new Set([...availableChannels, ...(alert?.channels || [])])];
+  const accountOptions = accounts.map(account => `<option value="${account.id}" ${account.id === alert?.account_id ? 'selected' : ''}>${escapeHtml(account.name)}${account.is_active ? '' : ' — inactive'}</option>`).join('');
+  const missingAccount = alert && !accounts.some(account => account.id === alert.account_id)
+    ? `<option value="${alert.account_id}" selected disabled>${escapeHtml(alert.account_name)} — unavailable</option>`
+    : '';
+  const channelMarkup = channelOptions.map(channel => {
+    const configured = availableChannels.includes(channel);
+    const label = channel === 'smtp' ? 'SMTP2GO email' : 'ntfy push notification';
+    return `<label class="account-toggle"><input class="balance-alert-channel" type="checkbox" value="${channel}" ${selectedChannels.has(channel) ? 'checked' : ''} data-configured="${configured}"><span>${label}${configured ? '' : ' (not configured)'}</span></label>`;
+  }).join('');
+  openModal({
+    title: alert ? 'Edit balance alert' : 'Add balance alert',
+    body: `<form id="balance-alert-form" class="form-grid">
+      <label class="full">Alert name<input id="balance-alert-name" value="${escapeHtml(alert?.name || '')}" maxlength="160" placeholder="Checking balance is low" required></label>
+      <label>Account<select id="balance-alert-account" required>${missingAccount}${accountOptions}</select></label>
+      <label>Condition<select id="balance-alert-comparison"><option value="below" ${alert?.comparison !== 'above' ? 'selected' : ''}>Balance falls below</option><option value="above" ${alert?.comparison === 'above' ? 'selected' : ''}>Balance rises above</option></select></label>
+      <label>Amount<input id="balance-alert-threshold" inputmode="decimal" value="${escapeHtml(alert?.threshold || '')}" placeholder="100.00" required></label>
+      <label><span><input id="balance-alert-enabled" type="checkbox" style="width:auto;min-height:auto" ${alert?.enabled !== false ? 'checked' : ''}> Alert is active</span></label>
+      <fieldset class="account-toggle-group full"><legend>Send through</legend><div class="account-toggle-row">${channelMarkup}</div></fieldset>
+      <p class="muted full">Mosaic sends once when the threshold is crossed and sends a recovery message when the balance returns to the other side.</p>
+    </form>`,
+    footer: `${alert ? '<button class="button button--danger delete-balance-alert" type="button">Delete alert</button>' : ''}<button class="button modal-cancel" type="button">Cancel</button><button class="button button--primary save-balance-alert" type="button" ${availableChannels.length || alert ? '' : 'disabled'}>${alert ? 'Save alert' : 'Add alert'}</button>`,
+    onMount(root) {
+      $('.modal-cancel', root).addEventListener('click', closeModal);
+      $$('input,select', root).forEach(control => control.addEventListener('input', () => { state.formDirty = true; }));
+      const save = async () => {
+        const name = $('#balance-alert-name', root).value.trim();
+        if (!name) { toast('Enter a name for this alert.', 'error'); return; }
+        let threshold;
+        try { threshold = unitsToString(toUnits($('#balance-alert-threshold', root).value)); }
+        catch { toast('Enter a valid balance amount.', 'error'); return; }
+        const channels = $$('.balance-alert-channel:checked', root).map(input => input.value);
+        if (!channels.length) { toast('Choose at least one configured notification channel.', 'error'); return; }
+        const enabled = $('#balance-alert-enabled', root).checked;
+        if (enabled && $$('.balance-alert-channel:checked[data-configured="false"]', root).length) {
+          toast('Configure the selected channel again, or pause the alert before saving.', 'error'); return;
+        }
+        const accountId = $('#balance-alert-account', root).value;
+        if (enabled && !accounts.some(account => account.id === accountId)) {
+          toast('Choose an available account with a current balance, or pause this alert.', 'error'); return;
+        }
+        const body = {
+          account_id: accountId,
+          name,
+          comparison: $('#balance-alert-comparison', root).value,
+          threshold,
+          channels,
+          enabled,
+          ...(alert ? { version: alert.version } : {}),
+        };
+        const button = $('.save-balance-alert', root); setButtonBusy(button, true, 'Saving…');
+        try {
+          const result = alert
+            ? await withConflict(current => api(`/api/alerts/balances/${alert.id}`, { method: 'PATCH', body: current }), body, 'balance alert')
+            : await api('/api/alerts/balances', { method: 'POST', body });
+          if (!result) return;
+          state.formDirty = false; closeModal();
+          toast(result.alert.triggered ? 'Balance alert saved and currently triggered' : 'Balance alert saved');
+          await renderMore();
+        } catch (error) { toast(error.message, 'error'); } finally { setButtonBusy(button, false); }
+      };
+      $('.save-balance-alert', root).addEventListener('click', save);
+      $('#balance-alert-form', root).addEventListener('submit', event => { event.preventDefault(); save(); });
+      $('.delete-balance-alert', root)?.addEventListener('click', async () => {
+        const accepted = await confirmDialog({
+          title: 'Delete this balance alert?',
+          message: 'It will stop watching this account. Existing notification delivery records remain in the audit trail.',
+          confirmText: 'Delete alert',
+          danger: true,
+        });
+        if (!accepted) return;
+        try {
+          const result = await withConflict(current => api(`/api/alerts/balances/${alert.id}`, { method: 'DELETE', body: current }), { version: alert.version }, 'balance alert deletion');
+          if (!result) return;
+          state.formDirty = false; closeModal(); toast('Balance alert deleted'); await renderMore();
+        } catch (error) { toast(error.message, 'error'); }
+      });
+    },
   });
 }
 
@@ -2157,7 +2535,7 @@ async function openConnectionDetails(connection) {
     className: 'modal--wide',
     body: `<div class="connection-card"><div class="connection-top"><div><strong>${connectionHealthMarkup(connection)}</strong><small>Next scheduled ${escapeHtml(relativeTime(connection.next_sync_at))}</small></div></div><div class="health-line">Last attempt: ${escapeHtml(relativeTime(connection.last_attempt_at))}</div><div class="health-line">Last success: ${escapeHtml(relativeTime(connection.last_success_at))}</div>${connection.last_error_message ? `<p class="danger">${escapeHtml(connection.last_error_message)}</p>` : ''}</div>
       <div class="form-section"><div class="button-row">${admin && connection.connected ? `<button class="button button--soft retry-connection" type="button">Queue retry</button><button class="button toggle-connection" type="button">${connection.enabled ? 'Pause automatic sync' : 'Resume automatic sync'}</button>` : ''}${admin && accounts.length ? '<button class="button button--soft manage-accounts" type="button">Manage accounts</button>' : ''}</div></div>
-      <div class="form-section"><strong>Accounts</strong>${accounts.map(account => `<div class="connection-card account-source-card ${account.is_duplicate ? 'is-duplicate-account' : ''}"><div class="connection-top"><div><strong>${escapeHtml(account.name)} ${account.is_duplicate ? '<span class="pill duplicate-account-badge">Duplicate</span>' : ''}</strong><small>${account.is_duplicate ? 'Transactions hidden' : (account.is_budget ? 'Included in budget' : 'Off budget')} · ${escapeHtml(account.currency)}</small></div><b>${money(account.balance)}</b></div></div>`).join('') || '<p class="muted">No accounts have been imported yet.</p>'}</div>
+      <div class="form-section"><strong>Accounts</strong>${accounts.map(account => `<div class="connection-card account-source-card ${account.is_duplicate ? 'is-duplicate-account' : !account.is_active ? 'is-inactive-account' : ''}"><div class="connection-top"><div><strong>${escapeHtml(account.name)} ${account.is_duplicate ? '<span class="pill duplicate-account-badge">Duplicate</span>' : !account.is_active ? '<span class="pill inactive-account-badge">Inactive</span>' : ''}</strong><small>${account.is_duplicate ? 'Transactions hidden' : !account.is_active ? 'Inactive' : (account.is_budget ? 'Included in budget' : 'Off budget')} · ${escapeHtml(account.currency)}</small></div><b>${money(account.balance)}</b></div></div>`).join('') || '<p class="muted">No accounts have been imported yet.</p>'}</div>
       <div class="form-section"><strong>Recent synchronization runs</strong>${runs.slice(0,10).map(run => `<div class="health-line"><span class="status-dot"></span>${escapeHtml(formatDate(run.started_at))} · ${escapeHtml(run.status)} · ${run.transactions_new} new / ${run.transactions_changed} changed${run.error_message ? ` · ${escapeHtml(run.error_message)}` : ''}</div>`).join('') || '<p class="muted">The first run has not started yet.</p>'}</div>
       ${admin && connection.connected ? '<div class="form-section"><button class="button button--danger disconnect-connection" type="button">Disconnect and destroy credential</button></div>' : ''}`,
     footer: '<button class="button modal-cancel" type="button">Close</button>',
@@ -2182,31 +2560,91 @@ async function openConnectionDetails(connection) {
 function openAccountManager(connection, accounts) {
   openModal({
     title: `Accounts in ${connection.name}`,
-    body: `<div class="account-editor-list">${accounts.map(account => `<div class="connection-card account-editor-card ${account.is_duplicate ? 'is-duplicate-account' : ''}" data-account-id="${account.id}"><label><span class="account-name-label">Name <span class="pill duplicate-account-badge ${account.is_duplicate ? '' : 'hidden'}">Duplicate</span></span><input class="account-name" value="${escapeHtml(account.name)}" required maxlength="255"></label><label><span><input class="account-duplicate" type="checkbox" style="width:auto;min-height:auto" ${account.is_duplicate ? 'checked' : ''}> This is a duplicate account</span><small class="duplicate-account-help">${account.is_duplicate ? 'Imported source history is retained, but its transactions are hidden and excluded from the budget.' : 'Mark this only when the same bank account is already imported through another connection.'}</small></label><div class="button-row"><label><span><input class="account-budget" type="checkbox" style="width:auto;min-height:auto" ${account.is_budget ? 'checked' : ''} ${account.is_duplicate ? 'disabled' : ''}> Include in budget</span></label><label><span><input class="account-active" type="checkbox" style="width:auto;min-height:auto" ${account.is_active ? 'checked' : ''} ${account.is_duplicate ? 'disabled' : ''}> Active</span></label></div><button class="button button--soft save-account" type="button">Save account</button></div>`).join('')}</div>`,
-    footer: '<button class="button modal-cancel" type="button">Close</button>',
+    className: 'modal--wide',
+    body: `<form id="account-manager-form"><div class="account-editor-list">${accounts.map(account => `<div class="connection-card account-editor-card ${account.is_duplicate ? 'is-duplicate-account' : ''}" data-account-id="${account.id}"><label><span class="account-name-label">Name <span class="pill duplicate-account-badge ${account.is_duplicate ? '' : 'hidden'}">Duplicate</span></span><input class="account-name" value="${escapeHtml(account.name)}" required maxlength="255"></label><fieldset class="account-toggle-group"><legend class="sr-only">Account settings</legend><label class="account-toggle account-toggle--duplicate"><input class="account-duplicate" type="checkbox" ${account.is_duplicate ? 'checked' : ''}><span>This is a duplicate account</span></label><div class="account-toggle-row"><label class="account-toggle"><input class="account-budget" type="checkbox" ${account.is_budget ? 'checked' : ''} ${account.is_duplicate ? 'disabled' : ''}><span>Include in budget</span></label><label class="account-toggle"><input class="account-active" type="checkbox" ${account.is_active ? 'checked' : ''} ${account.is_duplicate ? 'disabled' : ''}><span>Active</span></label></div></fieldset></div>`).join('')}</div></form>`,
+    footer: '<button class="button modal-cancel" type="button">Cancel</button><button class="button button--primary save-all-accounts" type="submit" form="account-manager-form" disabled>Save all accounts</button>',
     onMount(root) {
+      const form = $('#account-manager-form', root);
+      const saveButton = $('.save-all-accounts', root);
+      const initialAccounts = new Map(accounts.map(account => [account.id, {
+        name: account.name.trim(),
+        is_budget: account.is_budget,
+        is_active: account.is_active,
+        is_duplicate: account.is_duplicate,
+      }]));
+      const draftForCard = card => ({
+        id: card.dataset.accountId,
+        name: $('.account-name', card).value.trim(),
+        is_budget: $('.account-budget', card).checked,
+        is_active: $('.account-active', card).checked,
+        is_duplicate: $('.account-duplicate', card).checked,
+      });
+      const hasChanged = draft => {
+        const initial = initialAccounts.get(draft.id);
+        return !initial || draft.name !== initial.name || draft.is_budget !== initial.is_budget
+          || draft.is_active !== initial.is_active || draft.is_duplicate !== initial.is_duplicate;
+      };
+      const updateDirtyState = () => {
+        state.formDirty = $$('.account-editor-card', root).some(card => hasChanged(draftForCard(card)));
+        saveButton.disabled = !state.formDirty;
+      };
+      const updateDuplicateState = card => {
+        const duplicate = $('.account-duplicate', card).checked;
+        card.classList.toggle('is-duplicate-account', duplicate);
+        $('.duplicate-account-badge', card).classList.toggle('hidden', !duplicate);
+        $('.account-budget', card).disabled = duplicate;
+        $('.account-active', card).disabled = duplicate;
+      };
+      const setSaving = saving => {
+        form.setAttribute('aria-busy', String(saving));
+        $$('input', form).forEach(input => { input.disabled = saving; });
+        $('.modal-cancel', root).disabled = saving;
+        $('.modal-close', root).disabled = saving;
+        if (!saving) $$('.account-editor-card', root).forEach(updateDuplicateState);
+        setButtonBusy(saveButton, saving, 'Saving accounts…');
+      };
       $('.modal-cancel', root).addEventListener('click', closeModal);
       $$('.account-duplicate', root).forEach(input => input.addEventListener('change', () => {
         const card = input.closest('.connection-card');
-        card.classList.toggle('is-duplicate-account', input.checked);
-        $('.duplicate-account-badge', card).classList.toggle('hidden', !input.checked);
-        $('.account-budget', card).disabled = input.checked;
-        $('.account-active', card).disabled = input.checked;
-        $('.duplicate-account-help', card).textContent = input.checked
-          ? 'Imported source history is retained, but its transactions are hidden and excluded from the budget.'
-          : 'Mark this only when the same bank account is already imported through another connection.';
+        updateDuplicateState(card);
+        updateDirtyState();
       }));
-      $$('.save-account', root).forEach(button => button.addEventListener('click', async () => {
-        const card = button.closest('.connection-card'); const account = accounts.find(item => item.id === card.dataset.accountId);
-        const nameInput = $('.account-name', card);
-        const name = nameInput.value.trim();
-        if (!name) { toast('Enter an account name.', 'error'); nameInput.focus(); return; }
-        setButtonBusy(button, true, 'Saving…');
+      $$('.account-name, .account-budget, .account-active', root).forEach(input => input.addEventListener('input', updateDirtyState));
+      const save = async () => {
+        const updates = [];
+        for (const card of $$('.account-editor-card', root)) {
+          const account = accounts.find(item => item.id === card.dataset.accountId);
+          const draft = draftForCard(card);
+          if (!draft.name) { toast('Enter a name for every account.', 'error'); $('.account-name', card).focus(); return; }
+          if (!hasChanged(draft)) continue;
+          updates.push({
+            id: account.id,
+            version: account.version,
+            name: draft.name,
+            is_budget: draft.is_budget,
+            is_active: draft.is_active,
+            is_duplicate: draft.is_duplicate,
+          });
+        }
+        if (!updates.length) { updateDirtyState(); return; }
+        $$('.account-editor-card', root).forEach(card => card.classList.remove('has-conflict'));
+        setSaving(true);
         try {
-          const result = await withConflict(body => api(`/api/connections/accounts/${account.id}`, { method: 'PATCH', body }), { version: account.version, name, is_budget: $('.account-budget', card).checked, is_active: $('.account-active', card).checked, is_duplicate: $('.account-duplicate', card).checked }, 'account');
-          if (result) { Object.assign(account, result.account); toast(account.is_duplicate ? 'Duplicate account transactions hidden' : 'Account saved'); await refreshCurrentView(); }
-        } catch (error) { toast(error.message, 'error'); } finally { setButtonBusy(button, false); }
-      }));
+          const result = await api(`/api/connections/${connection.id}/accounts`, { method: 'PATCH', body: { accounts: updates } });
+          (result.accounts || []).forEach(updated => Object.assign(accounts.find(account => account.id === updated.id), updated));
+          state.formDirty = false;
+          closeModal();
+          toast(result.updated_count ? `${result.updated_count} account${result.updated_count === 1 ? '' : 's'} updated` : 'Accounts are already up to date');
+          await refreshCurrentView();
+        } catch (error) {
+          if (error instanceof ConflictError) {
+            const conflictIds = new Set((error.detail?.conflicts || []).map(conflict => conflict.id || conflict.account_id));
+            $$('.account-editor-card', root).forEach(card => card.classList.toggle('has-conflict', conflictIds.has(card.dataset.accountId)));
+            toast('Some accounts changed elsewhere. Your edits are still here; reload the account list before saving again.', 'error');
+          } else toast(error.message, 'error');
+        } finally { if (state.modalOpen && root.contains(form)) { setSaving(false); updateDirtyState(); } }
+      };
+      form.addEventListener('submit', event => { event.preventDefault(); save(); });
     },
   });
 }
@@ -2282,7 +2720,7 @@ function openMonthPicker() {
         if (!/^\d{4}-\d{2}$/.test(value)) return;
         closeTray({ restoreFocus: false });
         clearTransactionListSelection();
-        state.month = value; closeModal(); await loadBudget(); await renderCurrentView({ skipBudgetLoad: true });
+        state.month = value; closeModal(); if (await loadBudget()) await renderCurrentView({ skipBudgetLoad: true });
       };
       $('.choose-month', root).addEventListener('click', choose);
       $('#month-picker', root).addEventListener('change', () => { state.formDirty = true; });
@@ -2294,7 +2732,7 @@ function connectEvents() {
   state.eventSource?.close();
   const source = new EventSource('/api/events', { withCredentials: true });
   state.eventSource = source;
-  source.addEventListener('change', () => {
+  const scheduleRefresh = () => {
     clearTimeout(state.eventReloadTimer);
     const reload = async () => {
       if (state.formDirty || state.dragInProgress || state.assignmentInFlight || state.bulkTransactionInFlight) {
@@ -2304,8 +2742,10 @@ function connectEvents() {
       try { await refreshCurrentView(); } catch { /* ordinary API handler reports meaningful failures */ }
     };
     state.eventReloadTimer = setTimeout(reload, 650);
-  });
-  source.addEventListener('tick', () => syncPill());
+  };
+  source.addEventListener('ready', scheduleRefresh);
+  source.addEventListener('change', scheduleRefresh);
+  source.addEventListener('tick', () => { syncPill(); if (state.trayOpen) scheduleRefresh(); });
   source.onerror = () => {
     if (source.readyState === EventSource.CLOSED && state.me) setTimeout(connectEvents, 5000);
   };
@@ -2330,8 +2770,8 @@ async function initialize() {
   $('#brand-button').addEventListener('click', () => setView('budget'));
   $('#avatar-button').addEventListener('click', () => setView('more'));
   $('#sync-status').addEventListener('click', () => setView('more'));
-  $('#month-prev').addEventListener('click', async () => { closeTray({ restoreFocus: false }); clearTransactionListSelection(); state.month = addMonths(state.month, -1); await loadBudget(); await renderCurrentView({ skipBudgetLoad: true }); });
-  $('#month-next').addEventListener('click', async () => { closeTray({ restoreFocus: false }); clearTransactionListSelection(); state.month = addMonths(state.month, 1); await loadBudget(); await renderCurrentView({ skipBudgetLoad: true }); });
+  $('#month-prev').addEventListener('click', async () => { closeTray({ restoreFocus: false }); clearTransactionListSelection(); state.month = addMonths(state.month, -1); if (await loadBudget()) await renderCurrentView({ skipBudgetLoad: true }); });
+  $('#month-next').addEventListener('click', async () => { closeTray({ restoreFocus: false }); clearTransactionListSelection(); state.month = addMonths(state.month, 1); if (await loadBudget()) await renderCurrentView({ skipBudgetLoad: true }); });
   $('#month-label').addEventListener('click', openMonthPicker);
   $('#inbox-button').addEventListener('click', openTray);
   $('#tray-close').addEventListener('click', () => closeTray());
@@ -2363,7 +2803,7 @@ async function initialize() {
       await api('/api/auth/login', { method: 'POST', body: { email: $('#login-email').value.trim(), password: $('#login-password').value } });
       $('#login-password').value = '';
       await enterApplication();
-    } catch (error) { if (error.status !== 401 || !state.me) errorNode.textContent = error.message; } finally { setButtonBusy(button, false); }
+    } catch (error) { errorNode.textContent = error.message; } finally { setButtonBusy(button, false); }
   });
 
   try { await enterApplication(); }

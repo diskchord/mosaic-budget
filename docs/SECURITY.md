@@ -40,13 +40,15 @@ The session cookie is random, server-side, `HttpOnly`, `SameSite=Lax`, and optio
 
 ## Passwords and sessions
 
-Passwords are hashed with Argon2id. Failed logins are throttled by email/address identity without storing the raw identity. Sessions can be reviewed and revoked. Disabling a user removes their sessions. The owner cannot be removed until ownership is transferred.
+Passwords are hashed with Argon2id. Failed logins are throttled by email/address identity without storing the raw identity. Unknown emails, inactive users, and incorrect passwords receive the same generic inline credential error and do not create a session. The browser reserves its global session-ended message for authenticated requests whose session later expires. Sessions can be reviewed and revoked. Disabling a user removes their sessions. The owner cannot be removed until ownership is transferred.
 
 Use a long unique owner password and a password manager. TOTP is not implemented in this MVP, so reverse-proxy access controls or a private overlay network materially improve security.
 
 ## Data minimization
 
-SMTP and ntfy messages contain operational descriptions but omit merchant names, balances, transaction amounts, and credentials. Audit events may contain transaction serialization needed for accountability and should be treated as financial data.
+Ordinary SMTP and ntfy operational messages omit merchant names, balances, transaction amounts, and credentials. Owner-configured balance alerts are an explicit opt-in exception: a message sent through the channels selected for that alert includes its alert name, account name, current balance, and threshold. Treat the configured SMTP recipient and ntfy topic membership as authorized recipients of that financial information. Notification credentials themselves are never included in message content.
+
+Audit events may contain transaction serialization needed for accountability and should be treated as financial data.
 
 Raw SimpleFIN payloads are intentionally retained for recoverability and diagnosis. That is a reliability advantage and a privacy responsibility. Backups therefore require the same protection as the live database.
 

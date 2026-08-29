@@ -5,10 +5,12 @@ import hashlib
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from app.bootstrap import bootstrap
 from app.db import Base, SessionLocal, engine
+from app.main import app
 from app.models import (
     Account,
     Allocation,
@@ -23,6 +25,7 @@ from app.models import (
 )
 from app.security import encrypt_secret
 from app.services import sync as sync_service
+from app.services.budgets import serialize_transaction
 from app.utils import utcnow
 
 
@@ -150,6 +153,83 @@ def test_sync_preserves_custom_account_name_and_tracks_latest_provider_name(monk
         assert account is not None
         assert account.name == "Household Spending"
         assert account.extra["_simplefin_name"] == "Provider Renamed Checking"
+
+
+def test_noisy_ach_description_gets_a_non_destructive_display_payee(monkeypatch) -> None:
+    connection = _reset_with_connection()
+    raw_description = (
+        "ACH Withdrawal PwP PHILO TV TYPE: Privacycom "
+        "CO: PwP PHILO TV NAME: Alexander Peppe"
+    )
+    item = _transaction("philo-source", pending=False)
+    item["description"] = raw_description
+    item["extra"] = {"memo": "provider detail"}
+    monkeypatch.setattr(sync_service, "fetch_account_set", lambda *args, **kwargs: _payload([copy.deepcopy(item)]))
+
+    assert sync_service.perform_sync(connection.id)["status"] == "success"
+
+    with SessionLocal() as db:
+        transaction = db.scalar(select(BudgetTransaction))
+        source_version = db.scalar(select(SourceTransactionVersion))
+        serialized = serialize_transaction(transaction)
+        assert serialized["display_payee"] == "PHILO TV"
+        assert serialized["payee"] == raw_description
+        assert serialized["imported_description"] == raw_description
+        assert transaction.imported_extra == {"memo": "provider detail"}
+        assert source_version.description == raw_description
+        assert source_version.extra == {"memo": "provider detail"}
+
+
+def test_unchanged_payee_patch_does_not_freeze_the_imported_description(monkeypatch) -> None:
+    connection = _reset_with_connection()
+    raw_description = (
+        "ACH Withdrawal PwP PHILO TV TYPE: Privacycom "
+        "CO: PwP PHILO TV NAME: Alexander Peppe"
+    )
+    item = _transaction("philo-patch", pending=False)
+    item["description"] = raw_description
+    monkeypatch.setattr(sync_service, "fetch_account_set", lambda *args, **kwargs: _payload([copy.deepcopy(item)]))
+    assert sync_service.perform_sync(connection.id)["status"] == "success"
+
+    with SessionLocal() as db:
+        transaction = db.scalar(select(BudgetTransaction))
+        transaction_id = transaction.id
+        version = transaction.version
+        assert transaction.manual_payee_lock is False
+
+    with TestClient(app) as client:
+        login = client.post(
+            "/api/auth/login",
+            json={"email": "owner@example.com", "password": "correct-horse-battery-staple"},
+        )
+        assert login.status_code == 200
+        headers = {"X-CSRF-Token": client.cookies["mosaic_csrf"]}
+        unchanged = client.patch(
+            f"/api/transactions/{transaction_id}",
+            headers=headers,
+            json={"version": version, "payee": raw_description, "note": "Reviewed"},
+        )
+        assert unchanged.status_code == 200
+        assert unchanged.json()["transaction"]["display_payee"] == "PHILO TV"
+        with SessionLocal() as db:
+            assert db.get(BudgetTransaction, transaction_id).manual_payee_lock is False
+
+        customized = client.patch(
+            f"/api/transactions/{transaction_id}",
+            headers=headers,
+            json={
+                "version": unchanged.json()["transaction"]["version"],
+                "payee": "Philo Family",
+            },
+        )
+        assert customized.status_code == 200
+        assert customized.json()["transaction"]["display_payee"] == "Philo Family"
+
+    with SessionLocal() as db:
+        transaction = db.get(BudgetTransaction, transaction_id)
+        assert transaction.manual_payee_lock is True
+        assert transaction.payee == "Philo Family"
+        assert transaction.imported_description == raw_description
 
 
 def test_posted_replacement_reuses_pending_budget_transaction_and_manual_split(monkeypatch) -> None:

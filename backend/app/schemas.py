@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import unicodedata
 from datetime import date
 from typing import Any, Literal
 from uuid import UUID
@@ -137,6 +138,40 @@ class BatchTransactionUpdateRequest(BatchTransactionRequest):
         return self
 
 
+class AccountBatchUpdateItem(BaseModel):
+    id: UUID
+    version: int = Field(ge=1)
+    name: str = Field(min_length=1, max_length=255)
+    is_budget: bool
+    is_active: bool
+    is_duplicate: bool
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def name_must_not_be_blank(cls, name: Any) -> Any:
+        if not isinstance(name, str):
+            return name
+        clean_name = name.strip()
+        if not clean_name:
+            raise ValueError("Account name cannot be blank")
+        return clean_name
+
+
+class AccountBatchUpdateRequest(BaseModel):
+    accounts: list[AccountBatchUpdateItem] = Field(min_length=1, max_length=200)
+
+    @field_validator("accounts")
+    @classmethod
+    def accounts_must_be_unique(
+        cls,
+        accounts: list[AccountBatchUpdateItem],
+    ) -> list[AccountBatchUpdateItem]:
+        account_ids = [account.id for account in accounts]
+        if len(account_ids) != len(set(account_ids)):
+            raise ValueError("Include each account only once")
+        return accounts
+
+
 class TransactionUpdateRequest(BaseModel):
     version: int = Field(ge=1)
     payee: str | None = Field(default=None, min_length=1, max_length=500)
@@ -191,3 +226,35 @@ class SimpleFinClaimRequest(BaseModel):
 
 class IncidentAcknowledgeRequest(BaseModel):
     acknowledged: bool = True
+
+
+class BalanceAlertRequest(BaseModel):
+    account_id: UUID
+    name: str = Field(min_length=1, max_length=160)
+    comparison: Literal["below", "above"]
+    threshold: str = Field(min_length=1, max_length=80)
+    channels: list[Literal["smtp", "ntfy"]] = Field(min_length=1, max_length=2)
+    enabled: bool = True
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def balance_alert_name_must_not_be_blank(cls, name: Any) -> Any:
+        if not isinstance(name, str):
+            return name
+        if any(unicodedata.category(character) == "Cc" for character in name):
+            raise ValueError("Alert name cannot contain control characters")
+        return name.strip()
+
+    @field_validator("channels")
+    @classmethod
+    def balance_alert_channels_must_be_unique(
+        cls,
+        channels: list[Literal["smtp", "ntfy"]],
+    ) -> list[Literal["smtp", "ntfy"]]:
+        if len(channels) != len(set(channels)):
+            raise ValueError("Choose each notification channel only once")
+        return channels
+
+
+class BalanceAlertUpdateRequest(BalanceAlertRequest):
+    version: int = Field(ge=1)
