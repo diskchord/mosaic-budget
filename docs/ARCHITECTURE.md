@@ -38,13 +38,19 @@ Verified backup service --> mounted/off-host backup storage
 
 ### Editable budgeting layer
 
-- `budget_transactions` contains the effective date, display payee, notes, tags, flags, and manual locks.
+- `budget_transactions` contains the budgeting effective date, editable payee, notes, tags, flags, and manual locks.
 - `allocations` contains one or more exact signed amounts assigned to categories.
 - An unassigned transaction has zero allocations.
 - A normal categorized transaction has one allocation equal to the parent amount.
 - A split has multiple allocations whose sum equals the parent amount.
 
 A normal delete changes `deleted_at`; it does not remove either layer.
+
+### Recipient-first display labels
+
+The API derives a human-facing `display_payee` without rewriting either ledger. Structured SimpleFIN merchant/recipient fields take priority; otherwise a conservative ACH parser may promote a high-confidence company name and remove a known payment wrapper, such as displaying **PHILO TV** for a Privacy.com description containing `PwP PHILO TV`. Ambiguous descriptions remain unchanged.
+
+The complete imported description remains in the immutable source version and is retained separately on the editable transaction record. Its payee field remains editable. User-edited payees and rule-applied names take precedence over inference. Rules continue to evaluate the original fields, so improving a headline does not change matching behavior or provenance.
 
 ## Money and signs
 
@@ -79,6 +85,14 @@ For each month, the API loads all section/category identities, evaluates their e
 - Fund remaining includes the category's cumulative prior plans and activity.
 
 The server computes all totals. The browser formats and previews values but is not authoritative.
+
+## Global inbox and displayed-month assignment
+
+The budget response's unassigned inbox is deliberately workspace-wide rather than filtered to the displayed month. Deleted, excluded, duplicate-suppressed, and duplicate-account transactions are omitted, but an eligible July transaction remains available while the August budget is open. The tray names August as the target so that this cross-month effect is explicit before a drop.
+
+An inbox assignment sends the selected category, displayed target month, transaction IDs, and expected versions in one batch request. The server locks and validates the complete group, maps each budgeting effective date into the target year and month while preserving its day or clamping it to the month's final day, validates category availability on the resulting dates, and writes the date and allocations atomically. The move sets the manual date and allocation locks and clears review state; a failure changes none of the group.
+
+The response contains the moved transaction versions and a short-lived, HMAC-signed Undo token containing only the server-observed original date, lock, and review values. The token is bound to the workspace, user session, category, target month, transaction IDs, and assigned versions; the browser cannot author or alter the restore state. Undo verifies that receipt and the current versions, then atomically clears the new allocations and restores the originals. Immutable source dates and imported descriptions are never rewritten by either operation.
 
 ## Analytics computation
 

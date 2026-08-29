@@ -44,7 +44,7 @@ Names and ordering are shared across months. Month specificity controls whether 
 
 ## Sort incoming transactions
 
-The **to sort** button opens the inbox. Check the control on the left of any transaction bubble to build a selection on either desktop or touch devices. On a computer:
+The **to sort** button opens the shared, month-independent inbox of unsorted activity. The tray states which budget month is currently targeted. Dropping a July transaction while August is open moves its budgeting date into August and assigns it to the chosen August category in one atomic change. The day of month is preserved where possible and clamped to the target month's final day when necessary. Check the control on the left of any transaction bubble to build a selection on either desktop or touch devices. On a computer:
 
 - **Ctrl** (or **Cmd** on macOS) toggles individual bubbles.
 - **Shift** selects an inclusive range from the last selected bubble.
@@ -53,11 +53,11 @@ Drag a checked bubble onto a category to move the entire checked group. Dragging
 
 For a keyboard-friendly alternative, check the bubbles and choose **Assign selected...**, then choose the destination category. Selecting a bubble normally still opens its transaction editor for individual assignment or splitting.
 
-The target category previews its new remaining amount before assignment. Group assignment is atomic: either every selected transaction is assigned or none are changed. After a successful drop, the inbox returns smoothly, removes the assigned bubbles, stays open, and places focus on the next available transaction. **Undo** reverses the complete group together. A manual assignment locks categorization against ordinary background rules.
+The target category highlights during the drag. Group assignment is atomic: either every selected transaction is moved into the displayed month and assigned, or none are changed. After a successful drop, the category pulses with its updated amount, the confirmation names the destination month, and the inbox returns smoothly, removes the assigned bubbles, stays open, and places focus on the next available transaction. Moving the budgeting date sets its manual date lock, and assigning the category sets its manual allocation lock, so synchronization and ordinary background rules cannot silently reverse either choice. **Undo** restores the original dates, locks, review state, and complete unassigned group together.
 
 The inbox refreshes from the server before it opens, so a transaction categorized by a rule or another device is removed even if the page previously held an older copy. Rule runs report successful sorts separately from matching transactions that remain in **To sort** because an assignment was blocked or invalid; those transactions are left intact for review.
 
-SimpleFIN sometimes supplies a long bank-formatted description instead of a separate merchant name. When Mosaic can identify a high-confidence recipient or company, that shorter name is used as the transaction headline throughout the inbox, list, details, drag preview, and rule preview. The complete bank description remains available under **Imported source details**. A payee you edit yourself or rename with a rule always takes precedence, and ambiguous descriptions are displayed unchanged.
+SimpleFIN sometimes supplies a long bank-formatted description instead of a separate merchant name. When Mosaic can identify a high-confidence recipient or company, that shorter name is used as the transaction headline throughout the inbox, list, details, drag preview, and rule preview. For example, a Privacy.com ACH description containing `PwP PHILO TV` is headed **PHILO TV**. The complete bank description remains available under **Imported source details**, and the **Payee** field remains editable when you want a different permanent name. A payee you edit yourself or rename with a rule always takes precedence, and ambiguous descriptions are displayed unchanged.
 
 ## Split a transaction
 

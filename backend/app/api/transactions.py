@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from calendar import monthrange
 from datetime import date
 from decimal import Decimal
 
@@ -21,6 +22,12 @@ from ..schemas import (
     TransactionUpdateRequest,
 )
 from ..services.audit import write_audit
+from ..services.assignment_undo import (
+    AssignmentUndoState,
+    AssignmentUndoTokenError,
+    create_assignment_undo_token,
+    read_assignment_undo_token,
+)
 from ..services.balance_alerts import evaluate_balance_alerts
 from ..services.budgets import serialize_transaction
 from ..services.structure import category_visible_in_month
@@ -104,6 +111,10 @@ def _lock_account_before_manual_transaction(
 
 def _conflict(transaction: BudgetTransaction, message: str = "This transaction changed on another device") -> None:
     raise HTTPException(status_code=409, detail={"message": message, "current": serialize_transaction(transaction)})
+
+
+def _move_date_to_month(value: date, month: date) -> date:
+    return date(month.year, month.month, min(value.day, monthrange(month.year, month.month)[1]))
 
 
 def _batch_transactions_for_user(
@@ -414,6 +425,16 @@ def set_batch_allocations(
     auth: AuthContext = Depends(require_write),
     db: Session = Depends(get_db),
 ) -> dict:
+    if "restore_state" in payload.model_fields_set:
+        raise HTTPException(
+            status_code=409,
+            detail="Mosaic was updated. Reload the page before undoing this assignment.",
+        )
+    if payload.category_id is not None and payload.target_month is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Mosaic was updated. Reload the page before assigning transactions.",
+        )
     transactions = _batch_transactions_for_user(db, payload.transactions, auth.user.workspace_id)
     if any(transaction.deleted_at is not None for transaction in transactions):
         raise HTTPException(status_code=400, detail="Restore deleted transactions before categorizing them")
@@ -421,13 +442,64 @@ def set_batch_allocations(
         raise HTTPException(status_code=400, detail="Excluded transactions cannot be categorized")
 
     clearing = payload.category_id is None
+    target_month = None
+    if payload.target_month is not None:
+        try:
+            target_month = parse_month(payload.target_month)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if target_month > date(9999, 11, 1):
+            raise HTTPException(status_code=400, detail="Target month must be before December 9999")
+    undo_states: dict[uuid.UUID, AssignmentUndoState] = {}
+    undo_category_id: uuid.UUID | None = None
+    if payload.undo_token is not None:
+        try:
+            undo = read_assignment_undo_token(
+                payload.undo_token,
+                auth.user.workspace_id,
+                auth.user.id,
+                auth.session.id,
+            )
+        except AssignmentUndoTokenError as exc:
+            raise HTTPException(status_code=400, detail="This assignment can no longer be undone") from exc
+        undo_states = undo.states
+        undo_category_id = undo.category_id
+        if set(undo_states) != {transaction.id for transaction in transactions}:
+            raise HTTPException(status_code=400, detail="This Undo does not match the selected transactions")
+        if any(
+            undo_states[transaction.id].assigned_version != transaction.version
+            for transaction in transactions
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="One or more transactions changed after this assignment",
+            )
+    desired_dates = {
+        transaction.id: (
+            _move_date_to_month(transaction.effective_date, target_month)
+            if target_month is not None
+            else undo_states[transaction.id].effective_date
+            if transaction.id in undo_states
+            else transaction.effective_date
+        )
+        for transaction in transactions
+    }
     if clearing:
         if any(not transaction.allocations for transaction in transactions):
             raise HTTPException(status_code=400, detail="One or more transactions are already unassigned")
+        if undo_category_id is not None and any(
+            len(transaction.allocations) != 1
+            or transaction.allocations[0].category_id != undo_category_id
+            for transaction in transactions
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="One or more transactions changed after this assignment",
+            )
     else:
         if any(transaction.allocations for transaction in transactions):
             raise HTTPException(status_code=400, detail="Group assignment accepts only unassigned transactions")
-        for effective_date in {transaction.effective_date for transaction in transactions}:
+        for effective_date in set(desired_dates.values()):
             _validate_categories(
                 db,
                 auth.user.workspace_id,
@@ -437,7 +509,24 @@ def set_batch_allocations(
             )
 
     before_by_id = {transaction.id: serialize_transaction(transaction) for transaction in transactions}
+    original_states = {
+        transaction.id: AssignmentUndoState(
+            effective_date=transaction.effective_date,
+            manual_date_lock=transaction.manual_date_lock,
+            manual_allocation_lock=transaction.manual_allocation_lock,
+            needs_review=transaction.needs_review,
+            assigned_version=transaction.version + 1,
+        )
+        for transaction in transactions
+    }
     for transaction in transactions:
+        desired_date = desired_dates[transaction.id]
+        if target_month is not None:
+            transaction.effective_date = desired_date
+            transaction.manual_date_lock = True
+        elif transaction.id in undo_states:
+            transaction.effective_date = desired_date
+            transaction.manual_date_lock = undo_states[transaction.id].manual_date_lock
         allocations = (
             []
             if clearing
@@ -450,11 +539,21 @@ def set_batch_allocations(
             ]
         )
         _replace_allocations(db, transaction, allocations, manual_lock=True)
-        transaction.needs_review = False
+        if transaction.id in undo_states:
+            original = undo_states[transaction.id]
+            transaction.manual_allocation_lock = original.manual_allocation_lock
+            transaction.needs_review = original.needs_review
+        else:
+            transaction.needs_review = False
         transaction.version += 1
 
     db.flush()
     for transaction in transactions:
+        detail = {"batch": True, "batch_size": len(transactions)}
+        if target_month is not None:
+            detail["target_month"] = payload.target_month
+        elif undo_states:
+            detail["assignment_undone"] = True
         write_audit(
             db,
             workspace_id=auth.user.workspace_id,
@@ -464,10 +563,25 @@ def set_batch_allocations(
             object_id=transaction.id,
             before=before_by_id[transaction.id],
             after=serialize_transaction(transaction),
-            detail={"batch": True, "batch_size": len(transactions)},
+            detail=detail,
         )
+    undo_token = (
+        create_assignment_undo_token(
+            auth.user.workspace_id,
+            auth.user.id,
+            auth.session.id,
+            payload.category_id,
+            payload.target_month,
+            original_states,
+        )
+        if not clearing
+        else None
+    )
     db.commit()
-    return {"transactions": [serialize_transaction(transaction) for transaction in transactions]}
+    return {
+        "transactions": [serialize_transaction(transaction) for transaction in transactions],
+        "undo_token": undo_token,
+    }
 
 
 @router.patch("/batch")

@@ -193,9 +193,22 @@ function toast(message, type = 'default', action = null) {
   const node = document.createElement('div');
   node.className = `toast ${type === 'error' ? 'error' : ''}`;
   node.innerHTML = `<span>${escapeHtml(message)}</span>${action ? `<button type="button">${escapeHtml(action.label)}</button>` : ''}`;
-  if (action) $('button', node).addEventListener('click', () => { action.run(); node.remove(); });
   $('#toast-root').append(node);
-  setTimeout(() => node.remove(), action ? 7000 : 4200);
+  let removalTimer = setTimeout(() => node.remove(), action ? 7000 : 4200);
+  if (action) $('button', node).addEventListener('click', async event => {
+    const button = event.currentTarget;
+    if (button.disabled) return;
+    button.disabled = true;
+    clearTimeout(removalTimer);
+    let completed = false;
+    try { completed = await action.run() !== false; }
+    catch { completed = false; }
+    if (completed) node.remove();
+    else {
+      button.disabled = false;
+      removalTimer = setTimeout(() => node.remove(), 7000);
+    }
+  });
 }
 
 function setButtonBusy(button, busy, label = 'Working…') {
@@ -317,7 +330,12 @@ function syncPill() {
 }
 
 function updateNavigation() {
-  $$('.nav-item').forEach(item => item.classList.toggle('active', item.dataset.view === state.view));
+  $$('.nav-item').forEach(item => {
+    const active = item.dataset.view === state.view;
+    item.classList.toggle('active', active);
+    if (active) item.setAttribute('aria-current', 'page');
+    else item.removeAttribute('aria-current');
+  });
   $('#month-control').classList.toggle('hidden', !['budget', 'transactions', 'rules'].includes(state.view));
   const unsortedCount = trayTransactions().length;
   $('#inbox-button').classList.toggle('hidden', !unsortedCount || state.view !== 'budget');
@@ -354,15 +372,18 @@ async function loadBudget({ silent = false } = {}) {
 
 async function refreshCurrentView() {
   try {
-    if (!await loadBudget({ silent: true })) return;
-    await renderCurrentView({ skipBudgetLoad: true });
-  } catch (error) { if (error.status !== 401) toast(error.message, 'error'); }
+    if (!await loadBudget({ silent: true })) return false;
+    return await renderCurrentView({ skipBudgetLoad: true });
+  } catch (error) {
+    if (error.status !== 401) toast(error.message, 'error');
+    return false;
+  }
 }
 
 async function renderCurrentView({ skipBudgetLoad = false } = {}) {
   const requestedView = state.view;
   try {
-    if (!state.budget && !skipBudgetLoad && !await loadBudget()) return;
+    if (!state.budget && !skipBudgetLoad && !await loadBudget()) return false;
     if (state.view === 'budget') renderBudget();
     else if (state.view === 'transactions') await renderTransactions();
     else if (state.view === 'analytics') await renderAnalytics();
@@ -370,11 +391,13 @@ async function renderCurrentView({ skipBudgetLoad = false } = {}) {
     else await renderMore();
     updateNavigation();
     hydrateIcons($('#app-view'));
+    return true;
   } catch (error) {
     if (error.status !== 401 && state.view === requestedView) {
       $('#app-view').innerHTML = `<div class="empty-state"><strong>Unable to load this screen</strong>${escapeHtml(error.message)}</div>`;
       toast(error.message, 'error');
     }
+    return false;
   }
 }
 
@@ -1064,6 +1087,9 @@ function selectBubbleRange(transactionId, additive = false) {
 function renderTray() {
   const container = $('#transaction-bubbles');
   if (!container || !state.budget) return;
+  $('#tray-title').textContent = 'Transactions to sort';
+  $('#tray-target').textContent = `ASSIGN TO ${monthLabel(state.month).toLocaleUpperCase()}`;
+  $('#tray-help').textContent = `Drop into a category to assign it to ${monthLabel(state.month)}. Select from the left edge; touch and hold on mobile.`;
   const focusedBubble = document.activeElement?.closest?.('.tx-bubble');
   const focusedId = focusedBubble?.dataset.transactionId || null;
   const focusedControl = document.activeElement?.classList.contains('tx-select') ? 'select' : 'content';
@@ -1139,22 +1165,36 @@ function closeTray({ restoreFocus = true } = {}) {
   if (restoreFocus && !$('#inbox-button').classList.contains('hidden')) $('#inbox-button').focus({ preventScroll: true });
 }
 
-async function undoTransactionAssignment(transactions) {
-  if (!transactions.length || state.assignmentInFlight) return;
+async function undoTransactionAssignment(transactions, undoToken) {
+  if (!transactions.length || !undoToken || state.assignmentInFlight) return false;
   state.assignmentInFlight = true;
   try {
-    await api('/api/transactions/batch', {
+    const result = await api('/api/transactions/batch', {
       method: 'PUT',
       body: {
         category_id: null,
         transactions: transactions.map(transaction => ({ id: transaction.id, version: transaction.version })),
+        undo_token: undoToken,
       },
     });
-    toast(transactions.length === 1 ? 'Assignment undone' : `${transactions.length} assignments undone`);
-    await refreshCurrentView();
+    const refreshed = await refreshCurrentView();
+    if (!refreshed && state.budget) {
+      const restored = result.transactions || [];
+      const restoredIds = new Set(restored.map(transaction => transaction.id));
+      state.budget.unassigned = [
+        ...restored,
+        ...(state.budget.unassigned || []).filter(transaction => !restoredIds.has(transaction.id)),
+      ];
+      renderTray();
+      updateNavigation();
+    }
+    const message = transactions.length === 1 ? 'Assignment undone' : `${transactions.length} assignments undone`;
+    toast(refreshed ? message : `${message}. Reload to refresh budget totals.`);
+    return true;
   } catch (error) {
     if (error.status !== 401) toast(`Could not undo: ${error.message}`, 'error');
     if (error instanceof ConflictError) await refreshCurrentView();
+    return false;
   } finally {
     state.assignmentInFlight = false;
     syncBubbleSelection();
@@ -1170,6 +1210,7 @@ async function assignTransactions(transactionIds, categoryId, { keepTrayOpen = f
     return false;
   }
   state.assignmentInFlight = true;
+  const targetMonth = state.month;
   $('#transaction-tray')?.setAttribute('aria-busy', 'true');
   syncBubbleSelection();
   try {
@@ -1177,22 +1218,39 @@ async function assignTransactions(transactionIds, categoryId, { keepTrayOpen = f
       method: 'PUT',
       body: {
         category_id: category.id,
+        target_month: targetMonth,
         transactions: transactions.map(transaction => ({ id: transaction.id, version: transaction.version })),
       },
     });
     if (!keepTrayOpen) closeTray({ restoreFocus: false });
     const message = transactions.length === 1
-      ? `${transactionLabel(transactions[0])} assigned to ${category.name}`
-      : `${transactions.length} transactions assigned to ${category.name}`;
-    await refreshCurrentView();
+      ? `${transactionLabel(transactions[0])} moved to ${category.name} in ${monthLabel(targetMonth)}`
+      : `${transactions.length} transactions moved to ${category.name} in ${monthLabel(targetMonth)}`;
+    const refreshed = await refreshCurrentView();
+    if (!refreshed && state.budget) {
+      const assignedIds = new Set((result.transactions || []).map(transaction => transaction.id));
+      state.budget.unassigned = (state.budget.unassigned || []).filter(
+        transaction => !assignedIds.has(transaction.id)
+      );
+      reconcileBubbleSelection();
+      renderTray();
+      updateNavigation();
+    }
+    const assignedRow = $(`.category-row[data-category-id="${category.id}"]`, $('#app-view'));
+    if (assignedRow) {
+      assignedRow.classList.add('assignment-confirmed');
+      setTimeout(() => assignedRow.classList.remove('assignment-confirmed'), 1500);
+    }
     if (!keepTrayOpen) $('#app-view')?.focus({ preventScroll: true });
     state.assignmentInFlight = false;
     $('#transaction-tray')?.removeAttribute('aria-busy');
     syncBubbleSelection();
-    toast(message, 'default', {
+    const confirmation = refreshed ? message : `${message}. Reload to refresh budget totals.`;
+    const undoAction = result.undo_token ? {
       label: 'Undo',
-      run: () => undoTransactionAssignment(result.transactions || []),
-    });
+      run: () => undoTransactionAssignment(result.transactions || [], result.undo_token),
+    } : null;
+    toast(confirmation, 'default', undoAction);
     return true;
   } catch (error) {
     if (error.status !== 401) toast(error.message, 'error');
@@ -1213,7 +1271,7 @@ function openSelectedAssignment() {
     return;
   }
   openModal({
-    title: `Assign ${transactionIds.length} transaction${transactionIds.length === 1 ? '' : 's'}`,
+    title: `Assign ${transactionIds.length} transaction${transactionIds.length === 1 ? '' : 's'} to ${monthLabel(state.month)}`,
     body: `<form id="group-assignment-form" class="form-grid">
       <label>Budget category<select id="group-assignment-category" required>${categoryOptions()}</select></label>
     </form>`,

@@ -72,13 +72,16 @@ def _create_transaction(
 
 
 def _batch_body(category_id: str | None, *transactions: dict) -> dict:
-    return {
+    body = {
         "category_id": category_id,
         "transactions": [
             {"id": transaction["id"], "version": transaction["version"]}
             for transaction in transactions
         ],
     }
+    if category_id is not None:
+        body["target_month"] = "2026-08"
+    return body
 
 
 def _get_transaction(client: TestClient, transaction_id: str) -> dict:
@@ -134,7 +137,10 @@ def test_batch_assignment_and_undo_update_every_transaction_and_budget_atomicall
         )
         audits = _batch_audits()
         assert {str(event.object_id) for event in audits} == {first["id"], second["id"]}
-        assert all(event.detail == {"batch": True, "batch_size": 2} for event in audits)
+        assert all(
+            event.detail == {"batch": True, "batch_size": 2, "target_month": "2026-08"}
+            for event in audits
+        )
         assert all(event.before["allocations"] == [] for event in audits)
         assert all(len(event.after["allocations"]) == 1 for event in audits)
 
@@ -152,6 +158,324 @@ def test_batch_assignment_and_undo_update_every_transaction_and_budget_atomicall
         ]
         assert _category(_budget(client))["activity"] == "0"
         assert len(_batch_audits()) == 4
+
+
+def test_cross_month_income_drop_moves_into_displayed_month_and_undo_restores_original_state() -> None:
+    client, headers = _signed_in_client()
+    with client:
+        august_budget = _budget(client, "2026-08")
+        other_income = _category(august_budget, "Other Income")
+        cash = next(account for account in august_budget["accounts"] if account["name"] == "Cash Wallet")
+        july_income = _create_transaction(
+            client,
+            headers,
+            cash["id"],
+            payee="July income",
+            amount="160",
+            effective_date="2026-07-15",
+        )
+
+        # Model a synced transaction whose imported date and review state must
+        # be restored exactly if the user chooses Undo.
+        with SessionLocal() as db:
+            row = db.get(BudgetTransaction, uuid.UUID(july_income["id"]))
+            row.source_kind = "simplefin"
+            row.manual_date_lock = False
+            row.manual_allocation_lock = False
+            row.needs_review = True
+            db.commit()
+        july_income = _get_transaction(client, july_income["id"])
+
+        # The inbox remains global so a July transaction is available while
+        # the August budget is the visible drop target.
+        assert july_income["id"] in {
+            transaction["id"] for transaction in _budget(client, "2026-08")["unassigned"]
+        }
+
+        assigned = client.put(
+            "/api/transactions/batch",
+            headers=headers,
+            json={
+                "category_id": other_income["id"],
+                "target_month": "2026-08",
+                "transactions": [{"id": july_income["id"], "version": july_income["version"]}],
+            },
+        )
+        assert assigned.status_code == 200
+        assigned_payload = assigned.json()
+        moved = assigned_payload["transactions"][0]
+        undo_token = assigned_payload["undo_token"]
+        assert isinstance(undo_token, str)
+        assert moved["effective_date"] == "2026-08-15"
+        assert moved["manual_date_lock"] is True
+        assert moved["manual_allocation_lock"] is True
+        assert moved["needs_review"] is False
+        assert moved["allocations"][0]["category_id"] == other_income["id"]
+
+        refreshed_august = _budget(client, "2026-08")
+        assert moved["id"] not in {
+            transaction["id"] for transaction in refreshed_august["unassigned"]
+        }
+        assert _category(refreshed_august, "Other Income")["activity"] == "160"
+        assert refreshed_august["summary"]["actual_income"] == "160"
+        assert _category(_budget(client, "2026-07"), "Other Income")["activity"] == "0"
+
+        tampered_token = undo_token[:-1] + ("0" if undo_token[-1] != "0" else "1")
+        rejected_undo = client.put(
+            "/api/transactions/batch",
+            headers=headers,
+            json={
+                "category_id": None,
+                "transactions": [{"id": moved["id"], "version": moved["version"]}],
+                "undo_token": tampered_token,
+            },
+        )
+        assert rejected_undo.status_code == 400
+        assert _get_transaction(client, moved["id"]) == moved
+
+        undone = client.put(
+            "/api/transactions/batch",
+            headers=headers,
+            json={
+                "category_id": None,
+                "transactions": [{"id": moved["id"], "version": moved["version"]}],
+                "undo_token": undo_token,
+            },
+        )
+        assert undone.status_code == 200
+        restored = undone.json()["transactions"][0]
+        assert restored["effective_date"] == "2026-07-15"
+        assert restored["manual_date_lock"] is False
+        assert restored["manual_allocation_lock"] is False
+        assert restored["needs_review"] is True
+        assert restored["allocations"] == []
+        assert restored["id"] in {
+            transaction["id"] for transaction in _budget(client, "2026-08")["unassigned"]
+        }
+
+
+def test_cross_month_assignment_clamps_day_to_target_month_end() -> None:
+    client, headers = _signed_in_client()
+    with client:
+        february_budget = _budget(client, "2026-02")
+        other_income = _category(february_budget, "Other Income")
+        cash = next(account for account in february_budget["accounts"] if account["name"] == "Cash Wallet")
+        january_income = _create_transaction(
+            client,
+            headers,
+            cash["id"],
+            payee="Month-end income",
+            amount="50",
+            effective_date="2026-01-31",
+        )
+
+        response = client.put(
+            "/api/transactions/batch",
+            headers=headers,
+            json={
+                "category_id": other_income["id"],
+                "target_month": "2026-02",
+                "transactions": [
+                    {"id": january_income["id"], "version": january_income["version"]}
+                ],
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["transactions"][0]["effective_date"] == "2026-02-28"
+        assert _category(_budget(client, "2026-02"), "Other Income")["activity"] == "50"
+
+
+def test_assignment_undo_token_is_session_bound_batch_bound_and_one_use() -> None:
+    client, headers = _signed_in_client()
+    with client:
+        budget = _budget(client)
+        groceries = _category(budget)
+        cash = next(account for account in budget["accounts"] if account["name"] == "Cash Wallet")
+        first = _create_transaction(client, headers, cash["id"], payee="Bound first")
+        second = _create_transaction(client, headers, cash["id"], payee="Bound second")
+        assigned_response = client.put(
+            "/api/transactions/batch",
+            headers=headers,
+            json={
+                **_batch_body(groceries["id"], first, second),
+                "target_month": "2026-08",
+            },
+        )
+        assert assigned_response.status_code == 200
+        assigned_payload = assigned_response.json()
+        assigned = assigned_payload["transactions"]
+        undo_token = assigned_payload["undo_token"]
+        undo_body = {
+            "category_id": None,
+            "transactions": [
+                {"id": transaction["id"], "version": transaction["version"]}
+                for transaction in assigned
+            ],
+            "undo_token": undo_token,
+        }
+
+        second_client = TestClient(app)
+        with second_client:
+            login = second_client.post(
+                "/api/auth/login",
+                json={"email": "owner@example.com", "password": "correct-horse-battery-staple"},
+            )
+            assert login.status_code == 200
+            rejected_session = second_client.put(
+                "/api/transactions/batch",
+                headers={"X-CSRF-Token": second_client.cookies["mosaic_csrf"]},
+                json=undo_body,
+            )
+        assert rejected_session.status_code == 400
+
+        rejected_subset = client.put(
+            "/api/transactions/batch",
+            headers=headers,
+            json={
+                "category_id": None,
+                "transactions": [undo_body["transactions"][0]],
+                "undo_token": undo_token,
+            },
+        )
+        assert rejected_subset.status_code == 400
+        assert all(_get_transaction(client, transaction["id"])["allocations"] for transaction in assigned)
+
+        undone = client.put(
+            "/api/transactions/batch",
+            headers=headers,
+            json=undo_body,
+        )
+        assert undone.status_code == 200
+        assert all(not transaction["allocations"] for transaction in undone.json()["transactions"])
+
+        replayed = client.put(
+            "/api/transactions/batch",
+            headers=headers,
+            json=undo_body,
+        )
+        assert replayed.status_code == 409
+
+
+def test_same_month_assignment_locks_the_budgeting_date() -> None:
+    client, headers = _signed_in_client()
+    with client:
+        august_budget = _budget(client, "2026-08")
+        groceries = _category(august_budget)
+        cash = next(account for account in august_budget["accounts"] if account["name"] == "Cash Wallet")
+        transaction = _create_transaction(
+            client,
+            headers,
+            cash["id"],
+            payee="Same-month source transaction",
+            effective_date="2026-08-20",
+        )
+        with SessionLocal() as db:
+            row = db.get(BudgetTransaction, uuid.UUID(transaction["id"]))
+            row.source_kind = "simplefin"
+            row.manual_date_lock = False
+            row.manual_allocation_lock = False
+            db.commit()
+        transaction = _get_transaction(client, transaction["id"])
+
+        response = client.put(
+            "/api/transactions/batch",
+            headers=headers,
+            json={
+                "category_id": groceries["id"],
+                "target_month": "2026-08",
+                "transactions": [
+                    {"id": transaction["id"], "version": transaction["version"]}
+                ],
+            },
+        )
+        assert response.status_code == 200
+        assigned = response.json()["transactions"][0]
+        assert assigned["effective_date"] == "2026-08-20"
+        assert assigned["manual_date_lock"] is True
+
+
+def test_assignment_rejects_a_target_month_that_cannot_be_rendered() -> None:
+    client, headers = _signed_in_client()
+    with client:
+        budget = _budget(client)
+        groceries = _category(budget)
+        cash = next(account for account in budget["accounts"] if account["name"] == "Cash Wallet")
+        transaction = _create_transaction(client, headers, cash["id"], payee="Calendar boundary")
+
+        response = client.put(
+            "/api/transactions/batch",
+            headers=headers,
+            json={
+                "category_id": groceries["id"],
+                "target_month": "9999-12",
+                "transactions": [
+                    {"id": transaction["id"], "version": transaction["version"]}
+                ],
+            },
+        )
+        assert response.status_code == 400
+        assert response.json()["detail"] == "Target month must be before December 9999"
+        assert _get_transaction(client, transaction["id"])["allocations"] == []
+
+
+def test_stale_assignment_clients_fail_closed_without_changing_the_transaction() -> None:
+    client, headers = _signed_in_client()
+    with client:
+        august_budget = _budget(client, "2026-08")
+        other_income = _category(august_budget, "Other Income")
+        cash = next(account for account in august_budget["accounts"] if account["name"] == "Cash Wallet")
+        original = _create_transaction(
+            client,
+            headers,
+            cash["id"],
+            payee="Old browser",
+            amount="75",
+            effective_date="2026-07-12",
+        )
+
+        missing_month = client.put(
+            "/api/transactions/batch",
+            headers=headers,
+            json={
+                "category_id": other_income["id"],
+                "transactions": [{"id": original["id"], "version": original["version"]}],
+            },
+        )
+        assert missing_month.status_code == 409
+        assert "Reload" in missing_month.json()["detail"]
+        assert _get_transaction(client, original["id"]) == original
+
+        assigned_response = client.put(
+            "/api/transactions/batch",
+            headers=headers,
+            json={
+                "category_id": other_income["id"],
+                "target_month": "2026-08",
+                "transactions": [{"id": original["id"], "version": original["version"]}],
+            },
+        )
+        assert assigned_response.status_code == 200
+        assigned = assigned_response.json()["transactions"][0]
+
+        legacy_undo = client.put(
+            "/api/transactions/batch",
+            headers=headers,
+            json={
+                "category_id": None,
+                "transactions": [{"id": assigned["id"], "version": assigned["version"]}],
+                "restore_state": {
+                    assigned["id"]: {
+                        "effective_date": original["effective_date"],
+                        "manual_date_lock": original["manual_date_lock"],
+                        "manual_allocation_lock": original["manual_allocation_lock"],
+                        "needs_review": original["needs_review"],
+                    }
+                },
+            },
+        )
+        assert legacy_undo.status_code == 409
+        assert "Reload" in legacy_undo.json()["detail"]
+        assert _get_transaction(client, assigned["id"]) == assigned
 
 
 def test_batch_payload_rejects_missing_csrf_empty_duplicate_and_oversized_lists() -> None:
@@ -302,6 +626,7 @@ def test_batch_assignment_rejects_invalid_transaction_states_without_changing_pe
             headers=headers,
             json={
                 "category_id": groceries["id"],
+                "target_month": "2026-08",
                 "transactions": [
                     {"id": peer["id"], "version": peer["version"]},
                     {"id": str(uuid.uuid4()), "version": 1},
@@ -382,7 +707,7 @@ def test_batch_assignment_rejects_invalid_transaction_states_without_changing_pe
         assert len(_batch_audits()) == 0
 
 
-def test_batch_assignment_requires_category_availability_for_every_transaction_month() -> None:
+def test_batch_assignment_requires_category_availability_in_the_target_month() -> None:
     client, headers = _signed_in_client()
     with client:
         budget = _budget(client)
@@ -417,7 +742,10 @@ def test_batch_assignment_requires_category_availability_for_every_transaction_m
         response = client.put(
             "/api/transactions/batch",
             headers=headers,
-            json=_batch_body(groceries["id"], august, september),
+            json={
+                **_batch_body(groceries["id"], august, september),
+                "target_month": "2026-09",
+            },
         )
         assert response.status_code == 400
         assert "not available" in response.json()["detail"]
@@ -468,6 +796,7 @@ def test_batch_assignment_does_not_cross_workspaces_or_partially_update_owned_ro
             headers=headers,
             json={
                 "category_id": groceries["id"],
+                "target_month": "2026-08",
                 "transactions": [
                     {"id": owned["id"], "version": owned["version"]},
                     {"id": str(other_id), "version": other_version},

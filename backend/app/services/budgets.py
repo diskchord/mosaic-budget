@@ -117,6 +117,7 @@ def serialize_transaction(transaction: BudgetTransaction, include_allocations: b
         "needs_review": transaction.needs_review,
         "deleted_at": transaction.deleted_at.isoformat() if transaction.deleted_at else None,
         "version": transaction.version,
+        "manual_date_lock": transaction.manual_date_lock,
         "manual_allocation_lock": transaction.manual_allocation_lock,
     }
     if include_allocations:

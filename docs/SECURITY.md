@@ -6,7 +6,7 @@ Mosaic stores transaction history, account metadata, and a credential-bearing Si
 
 ## Secret handling
 
-- `APP_SECRET_KEY` keys login-throttle identifiers and future application signing needs.
+- `APP_SECRET_KEY` keys login-throttle identifiers and short-lived signed application receipts such as assignment Undo tokens.
 - `APP_ENCRYPTION_KEY` is a Fernet key used to encrypt the SimpleFIN Access URL at rest.
 - PostgreSQL, SMTP, and ntfy passwords remain environment secrets.
 - SimpleFIN setup tokens are accepted once and never stored.

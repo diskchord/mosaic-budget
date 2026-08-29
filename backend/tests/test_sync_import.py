@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import copy
 import hashlib
-from datetime import UTC, datetime
+import uuid
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from app.bootstrap import bootstrap
 from app.db import Base, SessionLocal, engine
@@ -275,6 +276,137 @@ def test_posted_replacement_reuses_pending_budget_transaction_and_manual_split(m
         assert pending_source.superseded_by_id == posted_source.id
     finally:
         db.close()
+
+
+def test_posted_replacement_reconciles_after_pending_transaction_moves_cross_month(monkeypatch) -> None:
+    connection = _reset_with_connection()
+    responses = [
+        _payload([_transaction("pending-moved", pending=True)]),
+        _payload([_transaction("posted-moved", pending=False, posted_offset_days=1)]),
+    ]
+    monkeypatch.setattr(sync_service, "fetch_account_set", lambda *args, **kwargs: copy.deepcopy(responses.pop(0)))
+
+    assert sync_service.perform_sync(connection.id)["status"] == "success"
+
+    with SessionLocal() as db:
+        transaction = db.scalar(select(BudgetTransaction))
+        groceries = db.scalar(select(Category).join(Section).where(Category.name == "Groceries"))
+        transaction.effective_date = date(2026, 9, 26)
+        transaction.manual_date_lock = True
+        transaction.allocations.append(
+            Allocation(category_id=groceries.id, amount=Decimal("-84.27"), memo="Manual choice", sort_order=0)
+        )
+        transaction.manual_allocation_lock = True
+        transaction.version += 1
+        original_id = transaction.id
+        groceries_id = groceries.id
+        db.commit()
+
+    assert sync_service.perform_sync(connection.id)["status"] == "success"
+
+    with SessionLocal() as db:
+        transactions = db.scalars(select(BudgetTransaction)).all()
+        assert len(transactions) == 1
+        transaction = transactions[0]
+        assert transaction.id == original_id
+        assert transaction.pending is False
+        assert transaction.effective_date == date(2026, 9, 26)
+        assert transaction.manual_date_lock is True
+        assert transaction.manual_allocation_lock is True
+        allocation = db.scalar(select(Allocation))
+        assert allocation.category_id == groceries_id
+        assert Decimal(allocation.amount) == Decimal("-84.2700")
+        sources = db.scalars(select(SourceTransaction).order_by(SourceTransaction.created_at)).all()
+        assert len(sources) == 2
+        pending_source = next(row for row in sources if row.source_transaction_id == "pending-moved")
+        posted_source = next(row for row in sources if row.source_transaction_id == "posted-moved")
+        assert pending_source.superseded_by_id == posted_source.id
+
+
+def test_pending_reconciliation_prefers_the_source_current_version_when_observation_times_tie(
+    monkeypatch,
+) -> None:
+    connection = _reset_with_connection()
+    older = _transaction("pending-tied", pending=True)
+    older["transacted_at"] = int(datetime(2026, 7, 26, 16, 0, tzinfo=UTC).timestamp())
+    current = _transaction("pending-tied", pending=True)
+    posted = _transaction("posted-tied", pending=False)
+    responses = [_payload([older]), _payload([current]), _payload([posted])]
+    monkeypatch.setattr(sync_service, "fetch_account_set", lambda *args, **kwargs: copy.deepcopy(responses.pop(0)))
+
+    assert sync_service.perform_sync(connection.id)["status"] == "success"
+    assert sync_service.perform_sync(connection.id)["status"] == "success"
+
+    with SessionLocal() as db:
+        transaction = db.scalar(select(BudgetTransaction))
+        source = db.scalar(select(SourceTransaction))
+        versions = db.scalars(
+            select(SourceTransactionVersion).where(SourceTransactionVersion.source_transaction_id == source.id)
+        ).all()
+        assert len(versions) == 2
+        current_version = next(
+            version for version in versions if version.import_batch_id == source.last_seen_batch_id
+        )
+        older_version = next(version for version in versions if version.id != current_version.id)
+        tied_at = datetime(2026, 8, 27, 13, 0, tzinfo=UTC)
+        older_version.observed_at = tied_at
+        current_version.observed_at = tied_at
+        # Make UUID chronology point at the older provider date. Reconciliation
+        # must still use the version from SourceTransaction.last_seen_batch_id.
+        older_version.id = uuid.UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
+        current_version.id = uuid.UUID("00000000-0000-0000-0000-000000000001")
+        groceries = db.scalar(select(Category).join(Section).where(Category.name == "Groceries"))
+        transaction.effective_date = date(2026, 9, 26)
+        transaction.manual_date_lock = True
+        transaction.allocations.append(
+            Allocation(category_id=groceries.id, amount=Decimal("-84.27"), memo="Manual choice", sort_order=0)
+        )
+        transaction.manual_allocation_lock = True
+        transaction.version += 1
+        original_id = transaction.id
+        db.commit()
+
+    assert sync_service.perform_sync(connection.id)["status"] == "success"
+
+    with SessionLocal() as db:
+        transactions = db.scalars(select(BudgetTransaction)).all()
+        assert len(transactions) == 1
+        transaction = transactions[0]
+        assert transaction.id == original_id
+        assert transaction.pending is False
+        assert transaction.effective_date == date(2026, 9, 26)
+        assert transaction.manual_date_lock is True
+        assert transaction.manual_allocation_lock is True
+
+
+def test_sync_row_lock_refreshes_manual_date_state_before_source_updates(monkeypatch) -> None:
+    connection = _reset_with_connection()
+    payload = _payload([_transaction("stale-lock", pending=True)])
+    monkeypatch.setattr(sync_service, "fetch_account_set", lambda *args, **kwargs: copy.deepcopy(payload))
+    assert sync_service.perform_sync(connection.id)["status"] == "success"
+
+    with SessionLocal() as db:
+        stale = db.scalar(select(BudgetTransaction))
+        assert stale.manual_date_lock is False
+        original_version = stale.version
+        db.execute(
+            update(BudgetTransaction)
+            .where(BudgetTransaction.id == stale.id)
+            .values(
+                effective_date=date(2026, 9, 26),
+                manual_date_lock=True,
+                version=original_version + 1,
+            ),
+            execution_options={"synchronize_session": False},
+        )
+        db.commit()
+        assert stale.manual_date_lock is False
+
+        refreshed = sync_service._locked_budget_transaction(db, stale.id)
+        assert refreshed is stale
+        assert refreshed.effective_date == date(2026, 9, 26)
+        assert refreshed.manual_date_lock is True
+        assert refreshed.version == original_version + 1
 
 
 def test_ambiguous_pending_match_preserves_every_record_and_flags_review(monkeypatch) -> None:

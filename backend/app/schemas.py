@@ -5,7 +5,7 @@ from datetime import date
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 
 class LoginRequest(BaseModel):
@@ -114,7 +114,23 @@ class BatchTransactionRequest(BaseModel):
 
 
 class BatchAllocationRequest(BatchTransactionRequest):
+    model_config = ConfigDict(extra="forbid")
+
     category_id: UUID | None
+    target_month: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}$")
+    undo_token: str | None = Field(default=None, max_length=65_536)
+    restore_state: dict[str, Any] = Field(
+        default_factory=dict,
+        max_length=200,
+    )
+
+    @model_validator(mode="after")
+    def date_move_options_match_operation(self) -> "BatchAllocationRequest":
+        if self.target_month is not None and self.category_id is None:
+            raise ValueError("A target month can only be used while assigning a category")
+        if self.undo_token is not None and self.category_id is not None:
+            raise ValueError("An Undo token can only be used while undoing an assignment")
+        return self
 
 
 class BatchTransactionUpdateRequest(BatchTransactionRequest):

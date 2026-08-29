@@ -6,7 +6,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select, text
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.orm import Session, selectinload
 
 from ..config import get_settings
@@ -35,6 +35,7 @@ from .simplefin import SimpleFinError, fetch_account_set
 logger = logging.getLogger(__name__)
 settings = get_settings()
 local_zone = ZoneInfo(settings.app_timezone)
+PENDING_CANDIDATE_LIMIT = 200
 
 
 def next_scheduled_at(now: datetime, interval_minutes: int, minute_offset: int) -> datetime:
@@ -76,6 +77,133 @@ def _adjust_allocations_for_amount_change(transaction: BudgetTransaction, old_am
     transaction.needs_review = True
 
 
+def _source_version_timestamp(version: SourceTransactionVersion) -> datetime | None:
+    return ensure_utc(version.transacted_at) or ensure_utc(version.posted_at)
+
+
+def _selected_source_versions(
+    db: Session,
+    transactions: list[BudgetTransaction],
+) -> dict[uuid.UUID, list[SourceTransactionVersion]]:
+    sources = [source for transaction in transactions for source in transaction.source_records]
+    source_ids = {source.id for source in sources}
+    if not source_ids:
+        return {}
+
+    selected: dict[uuid.UUID, list[SourceTransactionVersion]] = {}
+    current_versions = db.scalars(
+        select(SourceTransactionVersion)
+        .join(SourceTransaction)
+        .where(
+            SourceTransaction.id.in_(source_ids),
+            SourceTransactionVersion.import_batch_id == SourceTransaction.last_seen_batch_id,
+        )
+    ).all()
+    for version in current_versions:
+        selected.setdefault(version.source_transaction_id, []).append(version)
+
+    fallback_source_ids = source_ids - set(selected)
+    if fallback_source_ids:
+        latest_observed = (
+            select(
+                SourceTransactionVersion.source_transaction_id.label("source_transaction_id"),
+                func.max(SourceTransactionVersion.observed_at).label("latest_observed_at"),
+            )
+            .where(SourceTransactionVersion.source_transaction_id.in_(fallback_source_ids))
+            .group_by(SourceTransactionVersion.source_transaction_id)
+            .subquery()
+        )
+        fallback_versions = db.scalars(
+            select(SourceTransactionVersion).join(
+                latest_observed,
+                and_(
+                    SourceTransactionVersion.source_transaction_id
+                    == latest_observed.c.source_transaction_id,
+                    SourceTransactionVersion.observed_at == latest_observed.c.latest_observed_at,
+                ),
+            )
+        ).all()
+        for version in fallback_versions:
+            selected.setdefault(version.source_transaction_id, []).append(version)
+    return selected
+
+
+def _pending_source_date(
+    transaction: BudgetTransaction,
+    selected_versions: dict[uuid.UUID, list[SourceTransactionVersion]],
+) -> tuple[date | None, bool]:
+    """Return the current immutable source date and whether source chronology is decisive.
+
+    A version observed in the source's last-seen batch is the provider state that
+    produced that source observation. If an identical payload was observed later,
+    there is no version for the last-seen batch, so fall back to the uniquely latest
+    observed version. Timestamp ties with different source dates are deliberately
+    ambiguous instead of treating random UUID order as chronology.
+    """
+
+    source_dates: list[date] = []
+    decisive = False
+    for source in transaction.source_records:
+        versions = selected_versions.get(source.id, [])
+        timestamps = [_source_version_timestamp(version) for version in versions]
+        dated = {timestamp.astimezone(local_zone).date() for timestamp in timestamps if timestamp is not None}
+        if len(dated) > 1 or (dated and len(dated) != len(versions)):
+            return None, True
+        if dated:
+            decisive = True
+            source_dates.append(next(iter(dated)))
+
+    if len(set(source_dates)) > 1:
+        return None, True
+    return (source_dates[0] if source_dates else None), decisive
+
+
+def _locked_budget_transaction(
+    db: Session,
+    transaction_id: uuid.UUID,
+    *,
+    include_source_records: bool = False,
+) -> BudgetTransaction | None:
+    options = [
+        selectinload(BudgetTransaction.allocations),
+        selectinload(BudgetTransaction.account),
+    ]
+    if include_source_records:
+        options.append(selectinload(BudgetTransaction.source_records))
+    return db.scalar(
+        select(BudgetTransaction)
+        .where(BudgetTransaction.id == transaction_id)
+        .options(*options)
+        .execution_options(populate_existing=True)
+        .with_for_update()
+    )
+
+
+def _matches_pending_replacement(
+    transaction: BudgetTransaction,
+    *,
+    account_id: uuid.UUID,
+    amount: Decimal,
+    start: date,
+    end: date,
+    normalized_description: str,
+    selected_versions: dict[uuid.UUID, list[SourceTransactionVersion]],
+) -> bool:
+    if (
+        transaction.account_id != account_id
+        or not transaction.pending
+        or Decimal(transaction.amount) != amount
+        or transaction.deleted_at is not None
+        or normalize_description(transaction.imported_description or transaction.payee)
+        != normalized_description
+        or any(source.superseded_by_id for source in transaction.source_records)
+    ):
+        return False
+    source_date, decisive = _pending_source_date(transaction, selected_versions)
+    candidate_date = source_date if decisive else transaction.effective_date
+    return candidate_date is not None and start <= candidate_date <= end
+
+
 def _pending_candidates(
     db: Session,
     *,
@@ -86,29 +214,89 @@ def _pending_candidates(
 ) -> list[BudgetTransaction]:
     start = effective_date - timedelta(days=7)
     end = effective_date + timedelta(days=7)
+    utc_start = datetime.combine(start, time.min, tzinfo=local_zone).astimezone(UTC)
+    utc_end = datetime.combine(end + timedelta(days=1), time.min, tzinfo=local_zone).astimezone(UTC)
+    source_date_in_window = or_(
+        and_(
+            SourceTransactionVersion.transacted_at.is_not(None),
+            SourceTransactionVersion.transacted_at >= utc_start,
+            SourceTransactionVersion.transacted_at < utc_end,
+        ),
+        and_(
+            SourceTransactionVersion.transacted_at.is_(None),
+            SourceTransactionVersion.posted_at.is_not(None),
+            SourceTransactionVersion.posted_at >= utc_start,
+            SourceTransactionVersion.posted_at < utc_end,
+        ),
+    )
+    source_candidate_ids = (
+        select(SourceTransaction.budget_transaction_id)
+        .join(SourceTransactionVersion)
+        .where(
+            SourceTransaction.account_id == account.id,
+            SourceTransaction.superseded_by_id.is_(None),
+            source_date_in_window,
+        )
+    )
     rows = db.scalars(
         select(BudgetTransaction)
         .where(
             BudgetTransaction.account_id == account.id,
             BudgetTransaction.pending.is_(True),
             BudgetTransaction.amount == amount,
-            BudgetTransaction.effective_date >= start,
-            BudgetTransaction.effective_date <= end,
             BudgetTransaction.deleted_at.is_(None),
+            or_(
+                BudgetTransaction.id.in_(source_candidate_ids),
+                and_(
+                    BudgetTransaction.effective_date >= start,
+                    BudgetTransaction.effective_date <= end,
+                ),
+            ),
         )
-        .options(
-            selectinload(BudgetTransaction.allocations),
-            selectinload(BudgetTransaction.source_records),
-            selectinload(BudgetTransaction.account),
-        )
-        .limit(20)
+        .options(selectinload(BudgetTransaction.source_records))
+        .order_by(BudgetTransaction.created_at.desc(), BudgetTransaction.id)
+        .limit(PENDING_CANDIDATE_LIMIT + 1)
     ).all()
+    if len(rows) > PENDING_CANDIDATE_LIMIT:
+        logger.warning(
+            "Pending reconciliation candidate limit reached for account %s; preserving records for review",
+            account.id,
+        )
+        return []
+
     normalized = normalize_description(description)
+    selected_versions = _selected_source_versions(db, rows)
+    candidate_ids: list[uuid.UUID] = []
+    for row in rows:
+        if _matches_pending_replacement(
+            row,
+            account_id=account.id,
+            amount=amount,
+            start=start,
+            end=end,
+            normalized_description=normalized,
+            selected_versions=selected_versions,
+        ):
+            candidate_ids.append(row.id)
+
+    locked_rows: list[BudgetTransaction] = []
+    for transaction_id in sorted(candidate_ids, key=str):
+        row = _locked_budget_transaction(db, transaction_id, include_source_records=True)
+        if row is not None:
+            locked_rows.append(row)
+    locked_versions = _selected_source_versions(db, locked_rows)
     return [
         row
-        for row in rows
-        if normalize_description(row.imported_description or row.payee) == normalized
-        and not any(source.superseded_by_id for source in row.source_records)
+        for row in locked_rows
+        if _matches_pending_replacement(
+            row,
+            account_id=account.id,
+            amount=amount,
+            start=start,
+            end=end,
+            normalized_description=normalized,
+            selected_versions=locked_versions,
+        )
     ]
 
 
@@ -261,17 +449,15 @@ def _import_transaction(
     source = db.scalar(
         select(SourceTransaction)
         .where(SourceTransaction.account_id == account.id, SourceTransaction.source_transaction_id == source_id)
-        .options(
-            selectinload(SourceTransaction.versions),
-            selectinload(SourceTransaction.budget_transaction).selectinload(BudgetTransaction.allocations),
-            selectinload(SourceTransaction.budget_transaction).selectinload(BudgetTransaction.account),
-        )
+        .options(selectinload(SourceTransaction.versions))
     )
     if source:
         source.last_seen_batch_id = batch.id
         if any(version.content_hash == content_hash for version in source.versions):
             return False, False
-        transaction = source.budget_transaction
+        transaction = _locked_budget_transaction(db, source.budget_transaction_id)
+        if transaction is None:
+            raise ValueError("SimpleFIN source refers to a missing budget transaction")
         changed = _update_budget_transaction_from_source(
             transaction,
             amount=amount,
