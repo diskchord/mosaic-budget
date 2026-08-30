@@ -63,7 +63,7 @@ SimpleFIN sometimes supplies a long bank-formatted description instead of a sepa
 
 ## Split a transaction
 
-Open a transaction and choose **Split**. Add each category and exact signed amount. The remaining indicator must reach zero before saving. Mosaic rejects duplicate categories and any split whose exact total differs from the transaction.
+Open a transaction and choose its **Category** for a normal assignment. Choose **Add split** when the transaction belongs in more than one category, then enter each exact amount. The remaining indicator must reach zero before saving. Mosaic rejects duplicate categories and any split whose exact total differs from the transaction.
 
 ## Edit several transactions
 

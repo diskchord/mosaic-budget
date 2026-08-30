@@ -2295,12 +2295,41 @@ function signedInputForTransaction(transaction, raw) {
   return unitsToString(transactionUnits < 0n ? -(units < 0n ? -units : units) : (units < 0n ? -units : units));
 }
 
+function absoluteAllocationInput(value) {
+  let units = toUnits(value);
+  if (units < 0n) units = -units;
+  return unitsToString(units);
+}
+
+function allocationCategoryOptions(selected = '', split = false) {
+  return `<option value="" ${selected ? '' : 'selected'}>${split ? 'Choose category' : 'Unassigned'}</option>${categoryOptions(selected)}`;
+}
+
+function allocationEditorRow(transaction, allocation, split, index = 0) {
+  const categoryId = String(allocation?.category_id || '');
+  const rawAmount = String(allocation?.amount ?? '');
+  const amount = rawAmount.trim() ? absoluteAllocationInput(rawAmount) : '';
+  const splitNumber = index + 1;
+  return `<div class="split-row ${split ? '' : 'single-allocation-row'}">
+    <select class="allocation-category" aria-label="${split ? `Category for split ${splitNumber}` : 'Category'}">${allocationCategoryOptions(categoryId, split)}</select>
+    ${split ? `<input class="allocation-amount" inputmode="decimal" aria-label="Amount for split ${splitNumber}" placeholder="Amount" value="${escapeHtml(amount)}">
+    <button class="icon-button remove-allocation" type="button" aria-label="Remove split ${splitNumber}">×</button>` : ''}
+  </div>`;
+}
+
 function allocationEditorRows(transaction, allocations = transaction.allocations || []) {
-  return allocations.map(allocation => `<div class="split-row">
-    <select class="allocation-category" aria-label="Category">${categoryOptions(allocation.category_id)}</select>
-    <input class="allocation-amount" inputmode="decimal" aria-label="Amount" value="${escapeHtml(unitsToString(toUnits(allocation.amount) < 0n ? -toUnits(allocation.amount) : toUnits(allocation.amount)))}">
-    <button class="icon-button remove-allocation" type="button" aria-label="Remove split">×</button>
-  </div>`).join('');
+  const drafts = allocations.length
+    ? allocations
+    : [{ category_id: '', amount: transaction.amount }];
+  const split = drafts.length > 1;
+  return drafts.map((allocation, index) => allocationEditorRow(transaction, allocation, split, index)).join('');
+}
+
+function allocationDrafts(root, transaction) {
+  return $$('.split-row', $('.split-table', root)).map(row => ({
+    category_id: $('.allocation-category', row).value,
+    amount: $('.allocation-amount', row)?.value ?? absoluteAllocationInput(transaction.amount),
+  }));
 }
 
 function allocationTotals(root, transaction) {
@@ -2308,40 +2337,139 @@ function allocationTotals(root, transaction) {
   let total = 0n;
   let invalid = false;
   rows.forEach(row => {
-    try { total += toUnits(signedInputForTransaction(transaction, $('.allocation-amount', row).value)); }
+    const input = $('.allocation-amount', row);
+    if (!input?.value.trim()) { invalid = true; return; }
+    try { total += toUnits(signedInputForTransaction(transaction, input.value)); }
     catch { invalid = true; }
   });
   const target = toUnits(transaction.amount);
   const remainder = target - total;
   const node = $('.split-summary', root);
-  if (node) node.innerHTML = `<span>${invalid ? 'Check an amount' : `Allocated ${money(unitsToString(total))}`}</span><span class="${remainder === 0n ? 'positive' : 'warning'}">${remainder === 0n ? 'Balanced' : `${money(unitsToString(remainder))} remaining`}</span>`;
+  if (node) node.innerHTML = invalid
+    ? '<span>Check an amount</span><span class="warning">Incomplete</span>'
+    : `<span>Allocated ${money(unitsToString(total))}</span><span class="${remainder === 0n ? 'positive' : 'warning'}">${remainder === 0n ? 'Balanced' : `${money(unitsToString(remainder))} remaining`}</span>`;
   return { total, target, remainder, invalid };
 }
 
-function bindAllocationRows(root, transaction) {
+function renderAllocationRows(root, transaction, drafts, { focusIndex = null, revealFocus = false } = {}) {
+  const normalized = drafts.length
+    ? drafts
+    : [{ category_id: '', amount: transaction.amount }];
+  const split = normalized.length > 1;
+  const editor = $('.allocation-editor', root);
   const table = $('.split-table', root);
-  const bindRow = row => {
-    $('.remove-allocation', row).addEventListener('click', () => { row.remove(); allocationTotals(root, transaction); state.formDirty = true; });
-    $$('input,select', row).forEach(control => control.addEventListener('input', () => { allocationTotals(root, transaction); state.formDirty = true; }));
-  };
-  $$('.split-row', table).forEach(bindRow);
+  editor.dataset.allocationMode = split ? 'split' : 'single';
+  $('.allocation-title', editor).textContent = split ? 'Split categories' : 'Category';
+  table.innerHTML = normalized.map((allocation, index) => allocationEditorRow(transaction, allocation, split, index)).join('');
+  $('.split-summary', editor).classList.toggle('hidden', !split);
+  $('.assign-remainder', editor).classList.toggle('hidden', !split);
+  $$('input,select', table).forEach(control => {
+    const markChanged = () => {
+      control.removeAttribute('aria-invalid');
+      state.formDirty = true;
+      if (split) allocationTotals(root, transaction);
+    };
+    control.addEventListener('input', markChanged);
+    control.addEventListener('change', markChanged);
+  });
+  $$('.remove-allocation', table).forEach((button, index) => button.addEventListener('click', () => {
+    const next = allocationDrafts(root, transaction);
+    next.splice(index, 1);
+    state.formDirty = true;
+    renderAllocationRows(root, transaction, next, { focusIndex: Math.min(index, next.length - 1) });
+  }));
+  if (split) allocationTotals(root, transaction);
+  if (focusIndex !== null) {
+    const row = $$('.split-row', table)[Math.max(0, focusIndex)];
+    const control = $('.allocation-category', row || table);
+    control?.focus({ preventScroll: !revealFocus });
+    if (revealFocus) control?.scrollIntoView({ block: 'nearest' });
+  }
+}
+
+function rejectAllocation(control, message) {
+  control?.setAttribute('aria-invalid', 'true');
+  control?.focus({ preventScroll: true });
+  control?.scrollIntoView({ block: 'nearest' });
+  throw new Error(message);
+}
+
+function allocationPayload(root, transaction) {
+  const editor = $('.allocation-editor', root);
+  const rows = $$('.split-row', editor);
+  $$('[aria-invalid="true"]', editor).forEach(control => control.removeAttribute('aria-invalid'));
+  if (editor.dataset.allocationMode !== 'split') {
+    const categoryId = $('.allocation-category', rows[0])?.value || '';
+    return categoryId ? [{ category_id: categoryId, amount: String(transaction.amount), memo: '' }] : [];
+  }
+  const categoryControls = rows.map(row => $('.allocation-category', row));
+  const missingCategory = categoryControls.find(control => !control.value);
+  if (missingCategory) rejectAllocation(missingCategory, 'Choose a category for every split.');
+  const seenCategories = new Set();
+  const duplicateCategory = categoryControls.find(control => {
+    if (seenCategories.has(control.value)) return true;
+    seenCategories.add(control.value);
+    return false;
+  });
+  if (duplicateCategory) rejectAllocation(duplicateCategory, 'Choose each category only once.');
+  const invalidAmount = rows.map(row => $('.allocation-amount', row)).find(control => {
+    if (!control.value.trim()) return true;
+    try { signedInputForTransaction(transaction, control.value); return false; }
+    catch { return true; }
+  });
+  if (invalidAmount) rejectAllocation(invalidAmount, 'Enter a valid amount for every split.');
+  const totals = allocationTotals(root, transaction);
+  if (totals.remainder !== 0n) rejectAllocation($('.allocation-amount', rows.at(-1)), 'Split amounts must add up exactly.');
+  return rows.map(row => ({
+    category_id: $('.allocation-category', row).value,
+    amount: signedInputForTransaction(transaction, $('.allocation-amount', row).value),
+    memo: '',
+  }));
+}
+
+function bindAllocationRows(root, transaction) {
+  const initial = transaction.allocations?.length
+    ? transaction.allocations.map(allocation => ({ category_id: allocation.category_id, amount: allocation.amount }))
+    : [{ category_id: '', amount: transaction.amount }];
+  renderAllocationRows(root, transaction, initial);
   $('.add-allocation', root).addEventListener('click', () => {
-    const row = document.createElement('div');
-    row.className = 'split-row';
-    row.innerHTML = `<select class="allocation-category" aria-label="Category">${categoryOptions()}</select><input class="allocation-amount" inputmode="decimal" aria-label="Amount" value=""><button class="icon-button remove-allocation" type="button" aria-label="Remove split">×</button>`;
-    table.append(row); bindRow(row); $('.allocation-amount', row).focus(); state.formDirty = true; allocationTotals(root, transaction);
+    const drafts = allocationDrafts(root, transaction);
+    if (drafts.length >= 100) { toast('A transaction can have at most 100 splits.', 'error'); return; }
+    if (drafts.length === 1) drafts[0].amount = absoluteAllocationInput(transaction.amount);
+    drafts.push({ category_id: '', amount: '' });
+    state.formDirty = true;
+    renderAllocationRows(root, transaction, drafts, { focusIndex: drafts.length - 1, revealFocus: true });
   });
   $('.assign-remainder', root).addEventListener('click', () => {
-    const totals = allocationTotals(root, transaction);
     const rows = $$('.split-row', root);
-    if (!rows.length) $('.add-allocation', root).click();
-    const targetRow = $$('.split-row', root).at(-1);
-    const current = (() => { try { return toUnits(signedInputForTransaction(transaction, $('.allocation-amount', targetRow).value || '0')); } catch { return 0n; } })();
-    const next = current + totals.remainder;
-    $('.allocation-amount', targetRow).value = unitsToString(next < 0n ? -next : next);
+    const targetInput = $('.allocation-amount', rows.at(-1));
+    let earlierTotal = 0n;
+    for (const row of rows.slice(0, -1)) {
+      const input = $('.allocation-amount', row);
+      try {
+        if (!input.value.trim()) throw new Error();
+        earlierTotal += toUnits(signedInputForTransaction(transaction, input.value));
+      } catch {
+        input.setAttribute('aria-invalid', 'true');
+        input.focus({ preventScroll: true });
+        input.scrollIntoView({ block: 'nearest' });
+        toast('Enter a valid amount before filling the remainder.', 'error');
+        return;
+      }
+    }
+    const target = toUnits(transaction.amount);
+    const remainder = target - earlierTotal;
+    if (remainder !== 0n && (target === 0n || (remainder < 0n) !== (target < 0n))) {
+      targetInput.setAttribute('aria-invalid', 'true');
+      targetInput.focus({ preventScroll: true });
+      targetInput.scrollIntoView({ block: 'nearest' });
+      toast('Earlier splits already exceed the transaction total.', 'error');
+      return;
+    }
+    targetInput.removeAttribute('aria-invalid');
+    targetInput.value = unitsToString(remainder < 0n ? -remainder : remainder);
     allocationTotals(root, transaction); state.formDirty = true;
   });
-  allocationTotals(root, transaction);
 }
 
 async function openTransactionEditor(transactionId, {
@@ -2376,11 +2504,11 @@ async function openTransactionEditor(transactionId, {
       <label class="full"><span><input id="transaction-review" type="checkbox" style="width:auto;min-height:auto" ${transaction.needs_review ? 'checked' : ''}> Keep in Needs Review</span></label>
       <label class="full"><span><input id="transaction-excluded" type="checkbox" style="width:auto;min-height:auto" ${transaction.excluded ? 'checked' : ''}> Exclude from budget totals</span></label>
     </form>
-    <div class="form-section">
-      <div class="button-row" style="justify-content:space-between"><div><strong>Category allocation</strong><p class="muted" style="margin:3px 0">Use one row for a normal assignment or several rows to split it.</p></div><button class="button button--soft add-allocation" type="button">+ Split row</button></div>
+    <div class="form-section allocation-editor" data-allocation-mode="${transaction.allocations?.length > 1 ? 'split' : 'single'}">
+      <div class="allocation-header"><strong class="allocation-title">${transaction.allocations?.length > 1 ? 'Split categories' : 'Category'}</strong><button class="button button--soft add-allocation" type="button">+ Add split</button></div>
       <div class="split-table">${allocationEditorRows(transaction)}</div>
-      <div class="split-summary"></div>
-      <button class="button button--ghost assign-remainder" type="button">Put remainder in last row</button>
+      <div class="split-summary ${transaction.allocations?.length > 1 ? '' : 'hidden'}" role="status" aria-live="polite"></div>
+      <button class="button button--ghost assign-remainder ${transaction.allocations?.length > 1 ? '' : 'hidden'}" type="button">Fill remainder</button>
     </div>`}
     <div class="form-section"><details><summary>Imported source details</summary><p class="muted">${escapeHtml(transaction.imported_description || 'Manual transaction')}</p><p class="muted">Source: ${escapeHtml(transaction.source_kind)} · Revision ${transaction.version}</p></details></div>
     ${!deleted ? '<div class="form-section button-row"><button class="button button--soft create-rule-from-transaction" type="button">Create rule from this transaction</button><button class="button button--danger delete-transaction" type="button">Delete transaction</button></div>' : ''}`,
@@ -2400,7 +2528,7 @@ async function openTransactionEditor(transactionId, {
         return;
       }
       bindAllocationRows(root, transaction);
-      $$('input,textarea,select', root).forEach(control => control.addEventListener('input', () => { state.formDirty = true; }));
+      $$('#transaction-form input, #transaction-form textarea, #transaction-form select', root).forEach(control => control.addEventListener('input', () => { state.formDirty = true; }));
       $('.create-rule-from-transaction', root).addEventListener('click', () => { closeModal(); openRuleEditor(null, transaction); });
       $('.delete-transaction', root).addEventListener('click', async () => {
         const expected = unitsToString(toUnits(transaction.amount) < 0n ? -toUnits(transaction.amount) : toUnits(transaction.amount));
@@ -2419,17 +2547,11 @@ async function openTransactionEditor(transactionId, {
         } catch (error) { toast(error.message, 'error'); }
       });
       const save = async () => {
-        const totals = allocationTotals(root, transaction);
-        if (totals.invalid || ($$('.split-row', root).length && totals.remainder !== 0n)) {
-          toast('Split rows must add up exactly to the transaction amount.', 'error'); return;
-        }
+        let allocations;
+        try { allocations = allocationPayload(root, transaction); }
+        catch (error) { toast(error.message, 'error'); return; }
         const button = $('.save-transaction', root); setButtonBusy(button, true, 'Saving…');
         try {
-          const allocations = $$('.split-row', root).map(row => ({
-            category_id: $('.allocation-category', row).value,
-            amount: signedInputForTransaction(transaction, $('.allocation-amount', row).value),
-            memo: '',
-          }));
           const body = {
             version: transaction.version,
             effective_date: $('#transaction-date', root).value,

@@ -459,6 +459,152 @@ class MosaicCapture {
     if (!result?.ok) throw new Error(`${view} reorder affordances are incomplete: ${JSON.stringify(result)}`);
   }
 
+  async verifyInboxButton(minHeight) {
+    const result = await this.evaluate(`(() => {
+      const button = document.querySelector('#inbox-button:not(.hidden)');
+      const icon = button?.querySelector('[data-icon]');
+      const count = button?.querySelector('#inbox-count');
+      const label = button?.querySelector('span:last-child');
+      if (!button || !icon || !count || !label) return { ok: false, reason: 'missing element' };
+      const rect = button.getBoundingClientRect();
+      const centerY = item => {
+        const itemRect = item.getBoundingClientRect();
+        return itemRect.top + itemRect.height / 2;
+      };
+      const buttonCenter = rect.top + rect.height / 2;
+      const offsets = {
+        icon: Math.abs(centerY(icon) - buttonCenter),
+        count: Math.abs(centerY(count) - buttonCenter),
+        label: Math.abs(centerY(label) - buttonCenter),
+      };
+      return {
+        ok: rect.height >= ${Number(minHeight)}
+          && rect.left >= 0
+          && rect.right <= window.innerWidth
+          && document.documentElement.scrollWidth <= window.innerWidth
+          && Object.values(offsets).every(offset => offset <= 1.5),
+        height: rect.height,
+        width: rect.width,
+        viewport: window.innerWidth,
+        offsets,
+      };
+    })()`);
+    if (!result?.ok) throw new Error(`The to-sort button is not sized or aligned correctly: ${JSON.stringify(result)}`);
+  }
+
+  async verifyInboxClearance() {
+    const previousScroll = await this.evaluate(`window.scrollY`);
+    await this.evaluate(`window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'auto' })`);
+    await this.settle();
+    const result = await this.evaluate(`(() => {
+      const button = document.querySelector('#inbox-button:not(.hidden)');
+      const finalAction = document.querySelector('#app-view .add-section-card');
+      if (!button || !finalAction) return { ok: false, reason: 'missing element' };
+      const buttonRect = button.getBoundingClientRect();
+      const actionRect = finalAction.getBoundingClientRect();
+      const horizontalOverlap = Math.min(buttonRect.right, actionRect.right) - Math.max(buttonRect.left, actionRect.left);
+      const verticalOverlap = Math.min(buttonRect.bottom, actionRect.bottom) - Math.max(buttonRect.top, actionRect.top);
+      return {
+        ok: horizontalOverlap <= 0 || verticalOverlap <= 0,
+        horizontalOverlap,
+        verticalOverlap,
+        button: { top: buttonRect.top, bottom: buttonRect.bottom },
+        action: { top: actionRect.top, bottom: actionRect.bottom },
+        viewport: { width: innerWidth, height: innerHeight },
+      };
+    })()`);
+    await this.evaluate(`window.scrollTo({ top: ${Number(previousScroll)}, behavior: 'auto' })`);
+    await this.settle();
+    if (!result?.ok) throw new Error(`The to-sort button overlaps the final budget action: ${JSON.stringify(result)}`);
+  }
+
+  async verifySingleAllocationEditor() {
+    const result = await this.evaluate(`(() => {
+      const editor = document.querySelector('#modal-root .allocation-editor');
+      const rows = [...(editor?.querySelectorAll('.split-row') || [])];
+      const select = rows[0]?.querySelector('.allocation-category');
+      return {
+        ok: editor?.dataset.allocationMode === 'single'
+          && rows.length === 1
+          && select?.value === ''
+          && select?.selectedOptions[0]?.textContent.trim() === 'Unassigned'
+          && !editor.querySelector('.allocation-amount')
+          && !editor.querySelector('.remove-allocation')
+          && editor.querySelector('.allocation-title')?.textContent.trim() === 'Category'
+          && editor.querySelector('.add-allocation')?.textContent.includes('Add split')
+          && editor.querySelector('.split-summary')?.classList.contains('hidden')
+          && editor.querySelector('.assign-remainder')?.classList.contains('hidden'),
+        mode: editor?.dataset.allocationMode,
+        rows: rows.length,
+        selected: select?.value,
+      };
+    })()`);
+    if (!result?.ok) throw new Error(`The default single-category editor is incomplete: ${JSON.stringify(result)}`);
+  }
+
+  async exerciseSplitEditor() {
+    await this.click('#modal-root .add-allocation');
+    await this.waitUntil(
+      `document.querySelector('#modal-root .allocation-editor')?.dataset.allocationMode === 'split'
+        && document.querySelectorAll('#modal-root .split-row').length === 2
+        && document.querySelectorAll('#modal-root .allocation-amount').length === 2
+        && document.querySelector('#modal-root .split-row:nth-child(1) .allocation-category')?.getAttribute('aria-label') === 'Category for split 1'
+        && document.querySelector('#modal-root .split-row:nth-child(2) .allocation-amount')?.getAttribute('aria-label') === 'Amount for split 2'
+        && document.activeElement === document.querySelector('#modal-root .split-row:nth-child(2) .allocation-category')
+        && !document.querySelector('#modal-root .split-summary')?.classList.contains('hidden')
+        && !document.querySelector('#modal-root .assign-remainder')?.classList.contains('hidden')`,
+      'the split allocation editor',
+    );
+    await this.setValue('#modal-root .split-row:first-child .allocation-amount', '999999.99');
+    await this.click('#modal-root .assign-remainder');
+    await this.waitUntil(
+      `document.querySelector('#modal-root .split-row:last-child .allocation-amount')?.getAttribute('aria-invalid') === 'true'
+        && document.querySelector('#toast-root')?.textContent.includes('Earlier splits already exceed')`,
+      'overallocated splits to reject a misleading remainder',
+    );
+    await this.evaluate(`document.querySelector('#toast-root')?.replaceChildren()`);
+    await this.click('#modal-root .split-row:last-child .remove-allocation');
+    await this.verifySingleAllocationEditor();
+  }
+
+  async verifySingleAllocationSave() {
+    await this.goTo('budget');
+    await this.scrollTop();
+    await this.openTray(0);
+    const transactionId = await this.evaluate(`document.querySelector('#transaction-tray.open .tx-bubble:first-child')?.dataset.transactionId`);
+    if (!transactionId) throw new Error('A transaction is required to verify single-category saving');
+    const before = await this.evaluate(
+      `fetch('/api/transactions/${transactionId}').then(response => response.json()).then(body => body.transaction)`,
+    );
+    await this.click('#transaction-tray.open .tx-bubble:first-child .tx-bubble-content');
+    await this.waitUntil(
+      `document.querySelector('#transaction-form')?.dataset.transactionId === ${JSON.stringify(transactionId)}`,
+      'the single-category save transaction editor',
+    );
+    await this.verifySingleAllocationEditor();
+    await this.selectByText('#modal-root .allocation-category', 'Groceries');
+    const categoryId = await this.evaluate(`document.querySelector('#modal-root .allocation-category')?.value`);
+    await this.click('#modal-root .save-transaction');
+    await this.waitUntil(
+      `!document.querySelector('#modal-root .modal')
+        && !state.budget?.unassigned?.some(transaction => transaction.id === ${JSON.stringify(transactionId)})`,
+      'the single-category assignment to save',
+    );
+    const after = await this.evaluate(
+      `fetch('/api/transactions/${transactionId}').then(response => response.json()).then(body => body.transaction)`,
+    );
+    const saved = after?.allocations?.length === 1
+      && after.allocations[0].category_id === categoryId
+      && after.allocations[0].amount === before?.amount;
+    if (!saved) {
+      throw new Error(`Single-category saving did not preserve the exact transaction amount: ${JSON.stringify({ before, after, categoryId })}`);
+    }
+    if (await this.evaluate(`Boolean(document.querySelector('#transaction-tray.open'))`)) {
+      await this.click('#tray-close');
+      await this.waitUntil(`!document.querySelector('#transaction-tray.open')`, 'the verification tray to close');
+    }
+  }
+
   async setTheme(theme) {
     await this.goTo('more');
     const selector = `.theme-choice[data-theme-choice=${JSON.stringify(theme)}]`;
@@ -551,8 +697,27 @@ class MosaicCapture {
   }
 
   async openTray(selectionCount) {
-    await this.click('#inbox-button');
-    await this.waitFor('#transaction-tray.open .tx-bubble', 'the transaction sorting tray');
+    let opened = false;
+    let lastError = null;
+    for (let attempt = 0; attempt < 3 && !opened; attempt += 1) {
+      await this.click('#inbox-button');
+      try {
+        await this.waitUntil(
+          `document.querySelector('#transaction-tray.open .tx-bubble')`,
+          'the transaction sorting tray',
+          Math.min(6000, this.config.timeoutMs),
+        );
+        opened = true;
+      } catch (error) {
+        lastError = error;
+        await this.waitUntil(
+          `document.querySelector('#inbox-button')?.getAttribute('aria-busy') !== 'true'`,
+          'the to-sort button to finish refreshing',
+          Math.min(3000, this.config.timeoutMs),
+        ).catch(() => {});
+      }
+    }
+    if (!opened) throw lastError || new Error('Could not open the transaction sorting tray');
     await this.clickFirst('#transaction-tray.open .tx-select-control', selectionCount);
     await this.waitUntil(
       `document.querySelector('#tray-selection-count')?.textContent.trim().startsWith(${JSON.stringify(String(selectionCount))})`,
@@ -667,6 +832,8 @@ class MosaicCapture {
     await this.goTo('budget');
     await this.scrollTop();
     await this.verifyReorderAffordances('budget');
+    await this.verifyInboxButton(56);
+    await this.verifyInboxClearance();
     await this.capture(SCREENSHOTS.budgetDesktop);
 
     await this.setTheme('meadow');
@@ -690,7 +857,9 @@ class MosaicCapture {
         && document.querySelector('#transaction-tray.open')?.hasAttribute('inert')`,
       'the selected transaction details to open above the inactive sorting tray',
     );
+    await this.verifySingleAllocationEditor();
     await this.capture(SCREENSHOTS.inspectionDesktop);
+    await this.exerciseSplitEditor();
     await this.click('.modal-cancel');
     await this.waitUntil(
       `!document.querySelector('#modal-root .modal')
@@ -755,7 +924,14 @@ class MosaicCapture {
     await this.goTo('budget');
     await this.scrollTop();
     await this.verifyReorderAffordances('budget');
+    await this.verifyInboxButton(58);
+    await this.verifyInboxClearance();
     await this.capture(SCREENSHOTS.budgetMobile);
+    await this.setViewport({ width: 320, height: 844, mobile: true });
+    await this.waitUntil(`window.innerWidth === 320`, 'the narrow mobile viewport');
+    await this.verifyInboxButton(58);
+    await this.setViewport({ width: 390, height: 844, mobile: true });
+    await this.waitUntil(`window.innerWidth === 390`, 'the screenshot mobile viewport');
 
     await this.openTray(2);
     await this.capture(SCREENSHOTS.trayMobile);
@@ -774,6 +950,7 @@ class MosaicCapture {
         && document.querySelector('#transaction-tray.open')?.hasAttribute('inert')`,
       'the selected mobile transaction details to open above the inactive sorting tray',
     );
+    await this.verifySingleAllocationEditor();
     await this.click('.modal-cancel');
     await this.waitUntil(
       `!document.querySelector('#modal-root .modal')
@@ -809,6 +986,7 @@ class MosaicCapture {
     await this.waitFor('.analytics-chart .analytics-chart-month', 'mobile analytics');
     await this.evaluate(`document.querySelector('.analytics-kpis').scrollIntoView({ block: 'start', behavior: 'auto' })`);
     await this.capture(SCREENSHOTS.analyticsMobile);
+    await this.verifySingleAllocationSave();
   }
 
   async commit() {
