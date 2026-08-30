@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Made sorting confirmations click- and drag-through so stacked status bubbles no longer block transaction controls, while keeping their Undo buttons interactive
+- Added an installable Android companion with a polished HTTPS server picker, secure exact-origin WebView isolation, password-manager-compatible sign-in, complete feature parity, touch drag-and-drop, offline recovery, adaptive icons, and safe native Back behavior
 - Prepared the project for public GitHub collaboration with a concise README, Apache 2.0 licensing, CI, issue forms, pull-request guidance, and contribution and vulnerability-reporting policies
 - Added the Compose backup runner with atomic dumps, isolated restore verification, safe overlap locking, verified-backup records, retries, and retention
 - Replaced the inconsistent chart/mask branding with one polished mosaic-style vector mark across the app, favicon, and PWA

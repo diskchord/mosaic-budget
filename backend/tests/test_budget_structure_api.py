@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from app.bootstrap import bootstrap
-from app.db import Base, engine
+from app.db import Base, SessionLocal, engine
 from app.main import app
+from app.models import AuditEvent
 
 
 def _signed_in_client() -> tuple[TestClient, dict[str, str]]:
@@ -18,6 +20,24 @@ def _signed_in_client() -> tuple[TestClient, dict[str, str]]:
     )
     assert response.status_code == 200
     return client, {"X-CSRF-Token": client.cookies["mosaic_csrf"]}
+
+
+def _category(budget: dict, name: str) -> dict:
+    return next(
+        category
+        for section in budget["sections"]
+        for category in section["categories"]
+        if category["name"] == name
+    )
+
+
+def _budget_amount_audits() -> list[AuditEvent]:
+    with SessionLocal() as db:
+        return db.scalars(
+            select(AuditEvent)
+            .where(AuditEvent.action == "budget.amount.updated")
+            .order_by(AuditEvent.created_at, AuditEvent.id)
+        ).all()
 
 
 def test_create_move_reorder_and_archive_budget_structure() -> None:
@@ -57,6 +77,7 @@ def test_create_move_reorder_and_archive_budget_structure() -> None:
         latest = client.get("/api/budget", params={"month": "2026-08"}).json()
         latest_food = next(section for section in latest["sections"] if section["id"] == food["id"])
         assert latest_food["categories"][0]["name"] == "Coffee"
+        assert latest_food["categories"][0]["planned"] == "25"
 
         moved_response = client.patch(
             f"/api/categories/{category['id']}",
@@ -101,3 +122,90 @@ def test_create_move_reorder_and_archive_budget_structure() -> None:
             for section in latest["sections"]
             for category in section["categories"]
         )
+
+
+def test_changed_category_default_seeds_only_requested_zero_month_and_audits() -> None:
+    client, headers = _signed_in_client()
+    with client:
+        august = client.get("/api/budget", params={"month": "2026-08"}).json()
+        september = client.get("/api/budget", params={"month": "2026-09"}).json()
+        august_groceries = _category(august, "Groceries")
+        september_groceries = _category(september, "Groceries")
+        assert august_groceries["planned"] == "0"
+        assert september_groceries["planned"] == "0"
+
+        response = client.patch(
+            f"/api/categories/{august_groceries['id']}",
+            params={"current_month": "2026-08"},
+            headers=headers,
+            json={"version": august_groceries["version"], "default_planned": "75"},
+        )
+        assert response.status_code == 200
+        assert response.json()["category"]["default_planned"] == "75"
+
+        updated_august = _category(client.get("/api/budget", params={"month": "2026-08"}).json(), "Groceries")
+        unchanged_september = _category(
+            client.get("/api/budget", params={"month": "2026-09"}).json(),
+            "Groceries",
+        )
+        assert updated_august["planned"] == "75"
+        assert updated_august["budget_version"] == august_groceries["budget_version"] + 1
+        assert unchanged_september["planned"] == "0"
+        assert unchanged_september["budget_version"] == september_groceries["budget_version"]
+
+        audits = _budget_amount_audits()
+        assert len(audits) == 1
+        assert audits[0].object_type == "category_budget"
+        assert audits[0].before == {
+            "planned": "0",
+            "version": august_groceries["budget_version"],
+        }
+        assert audits[0].after == {
+            "month": "2026-08",
+            "category_id": august_groceries["id"],
+            "planned": "75",
+            "version": august_groceries["budget_version"] + 1,
+        }
+
+
+def test_category_default_preserves_nonzero_plan_and_unchanged_default_does_not_seed() -> None:
+    client, headers = _signed_in_client()
+    with client:
+        august = client.get("/api/budget", params={"month": "2026-08"}).json()
+        september = client.get("/api/budget", params={"month": "2026-09"}).json()
+        august_groceries = _category(august, "Groceries")
+        september_groceries = _category(september, "Groceries")
+
+        planned_response = client.put(
+            f"/api/budget/2026-08/categories/{august_groceries['id']}",
+            headers=headers,
+            json={"version": august_groceries["budget_version"], "planned": "35"},
+        )
+        assert planned_response.status_code == 200
+
+        changed_response = client.patch(
+            f"/api/categories/{august_groceries['id']}",
+            params={"current_month": "2026-08"},
+            headers=headers,
+            json={"version": august_groceries["version"], "default_planned": "75"},
+        )
+        assert changed_response.status_code == 200
+        changed_category = changed_response.json()["category"]
+        assert _category(client.get("/api/budget", params={"month": "2026-08"}).json(), "Groceries")["planned"] == "35"
+        assert _category(client.get("/api/budget", params={"month": "2026-09"}).json(), "Groceries")["planned"] == "0"
+        assert len(_budget_amount_audits()) == 1
+
+        unchanged_response = client.patch(
+            f"/api/categories/{august_groceries['id']}",
+            params={"current_month": "2026-09"},
+            headers=headers,
+            json={"version": changed_category["version"], "default_planned": "75"},
+        )
+        assert unchanged_response.status_code == 200
+        unchanged_september = _category(
+            client.get("/api/budget", params={"month": "2026-09"}).json(),
+            "Groceries",
+        )
+        assert unchanged_september["planned"] == "0"
+        assert unchanged_september["budget_version"] == september_groceries["budget_version"]
+        assert len(_budget_amount_audits()) == 1

@@ -441,9 +441,14 @@ def create_category(
 def update_category(
     category_id: uuid.UUID,
     payload: CategoryUpdateRequest,
+    current_month: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
     auth: AuthContext = Depends(require_write),
     db: Session = Depends(get_db),
 ) -> dict:
+    try:
+        current_month_date = parse_month(current_month) if current_month else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     category = _category_for_user(db, category_id, auth.user.workspace_id, lock=True)
     if category.version != payload.version:
         raise HTTPException(
@@ -474,7 +479,37 @@ def update_category(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         if amount < 0:
             raise HTTPException(status_code=400, detail="Planned amounts cannot be negative")
+        default_changed = amount != category.default_planned
         category.default_planned = amount
+        if default_changed and amount > 0 and current_month_date is not None:
+            budget = db.scalar(
+                select(CategoryBudget)
+                .where(
+                    CategoryBudget.workspace_id == auth.user.workspace_id,
+                    CategoryBudget.month == current_month_date,
+                    CategoryBudget.category_id == category.id,
+                )
+                .with_for_update()
+            )
+            if budget is not None and budget.planned == 0:
+                budget_before = {"planned": money_str(budget.planned), "version": budget.version}
+                budget.planned = amount
+                budget.version += 1
+                write_audit(
+                    db,
+                    workspace_id=auth.user.workspace_id,
+                    actor_user_id=auth.user.id,
+                    action="budget.amount.updated",
+                    object_type="category_budget",
+                    object_id=budget.id,
+                    before=budget_before,
+                    after={
+                        "month": current_month,
+                        "category_id": str(category.id),
+                        "planned": money_str(budget.planned),
+                        "version": budget.version,
+                    },
+                )
     if payload.note is not None:
         category.note = payload.note
     category.version += 1

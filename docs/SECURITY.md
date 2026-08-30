@@ -38,6 +38,21 @@ The server sends:
 
 The session cookie is random, server-side, `HttpOnly`, `SameSite=Lax`, and optionally `Secure`. State changes require a separate session-bound CSRF token in both the cookie and request header.
 
+## Android companion
+
+The Android companion loads the configured Mosaic server directly as a
+top-level HTTPS origin. It accepts only a root origin with a system-trusted
+certificate, keeps navigation on that exact host and port, refuses mixed and
+cleartext content, and never overrides TLS errors. JavaScript and first-party
+cookies are enabled because the Mosaic frontend requires them; third-party
+cookies, popups, file/content access, native JavaScript bridges, and WebView
+debugging are disabled.
+
+The native layer stores only the normalized server origin. Email/password
+entry and password-manager autofill occur in the server's own sign-in form.
+App backup and device-transfer extraction are disabled, and changing servers
+clears the companion's cookies, Web storage, form data, history, and cache.
+
 ## Passwords and sessions
 
 Passwords are hashed with Argon2id. Failed logins are throttled by email/address identity without storing the raw identity. Unknown emails, inactive users, and incorrect passwords receive the same generic inline credential error and do not create a session. The browser reserves its global session-ended message for authenticated requests whose session later expires. Sessions can be reviewed and revoked. Disabling a user removes their sessions. The owner cannot be removed until ownership is transferred.

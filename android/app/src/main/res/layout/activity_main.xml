@@ -1,0 +1,303 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/bg_setup">
+
+    <FrameLayout
+        android:id="@+id/setup_screen"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
+        <View
+            android:layout_width="360dp"
+            android:layout_height="360dp"
+            android:layout_gravity="top|end"
+            android:layout_marginTop="-176dp"
+            android:layout_marginEnd="-128dp"
+            android:background="@drawable/bg_halo_gold"
+            android:importantForAccessibility="no" />
+
+        <View
+            android:layout_width="330dp"
+            android:layout_height="330dp"
+            android:layout_gravity="bottom|start"
+            android:layout_marginStart="-164dp"
+            android:layout_marginBottom="-150dp"
+            android:background="@drawable/bg_halo_green"
+            android:importantForAccessibility="no" />
+
+        <ScrollView
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:clipToPadding="false"
+            android:fillViewport="true"
+            android:overScrollMode="never"
+            android:paddingStart="24dp"
+            android:paddingEnd="24dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_horizontal"
+                android:orientation="vertical"
+                android:paddingTop="44dp"
+                android:paddingBottom="40dp">
+
+                <ImageView
+                    android:layout_width="96dp"
+                    android:layout_height="96dp"
+                    android:contentDescription="@string/mosaic_logo_description"
+                    android:src="@drawable/mosaic_splash_icon" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="24dp"
+                    android:fontFamily="sans-serif-medium"
+                    android:letterSpacing="0.12"
+                    android:text="@string/setup_eyebrow"
+                    android:textColor="@color/green"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:fontFamily="sans-serif-black"
+                    android:gravity="center"
+                    android:includeFontPadding="false"
+                    android:text="@string/setup_title"
+                    android:textColor="@color/ink"
+                    android:textSize="34sp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:gravity="center"
+                    android:lineSpacingExtra="3dp"
+                    android:text="@string/setup_description"
+                    android:textColor="@color/muted_ink"
+                    android:textSize="16sp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="30dp"
+                    android:background="@drawable/bg_card"
+                    android:elevation="8dp"
+                    android:orientation="vertical"
+                    android:padding="24dp">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="sans-serif-medium"
+                        android:text="@string/server_label"
+                        android:textColor="@color/ink"
+                        android:textSize="14sp" />
+
+                    <EditText
+                        android:id="@+id/server_input"
+                        android:layout_width="match_parent"
+                        android:layout_height="56dp"
+                        android:layout_marginTop="9dp"
+                        android:autofillHints=""
+                        android:background="@drawable/bg_input"
+                        android:fontFamily="sans-serif"
+                        android:hint="@string/server_hint"
+                        android:imeOptions="actionGo"
+                        android:importantForAutofill="no"
+                        android:inputType="textUri"
+                        android:maxLines="1"
+                        android:paddingStart="17dp"
+                        android:paddingEnd="17dp"
+                        android:selectAllOnFocus="false"
+                        android:singleLine="true"
+                        android:textColor="@color/ink"
+                        android:textColorHint="@color/muted_ink"
+                        android:textSize="16sp" />
+
+                    <TextView
+                        android:id="@+id/server_error"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:accessibilityLiveRegion="polite"
+                        android:fontFamily="sans-serif-medium"
+                        android:lineSpacingExtra="2dp"
+                        android:textColor="@color/error"
+                        android:textSize="13sp"
+                        android:visibility="gone" />
+
+                    <Button
+                        android:id="@+id/connect_button"
+                        android:layout_width="match_parent"
+                        android:layout_height="58dp"
+                        android:layout_marginTop="18dp"
+                        android:background="@drawable/bg_button_primary"
+                        android:fontFamily="sans-serif-bold"
+                        android:minHeight="0dp"
+                        android:minWidth="0dp"
+                        android:paddingStart="18dp"
+                        android:paddingEnd="18dp"
+                        android:text="@string/connect"
+                        android:textAllCaps="false"
+                        android:textColor="@color/button_primary_text"
+                        android:textSize="16sp" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="17dp"
+                        android:drawableStart="@drawable/ic_lock"
+                        android:drawablePadding="8dp"
+                        android:gravity="center"
+                        android:text="@string/connection_privacy"
+                        android:textColor="@color/muted_ink"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="24dp"
+                    android:gravity="center"
+                    android:lineSpacingExtra="2dp"
+                    android:text="@string/setup_footer"
+                    android:textColor="@color/muted_ink"
+                    android:textSize="12sp" />
+            </LinearLayout>
+        </ScrollView>
+    </FrameLayout>
+
+    <FrameLayout
+        android:id="@+id/web_container"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@color/surface"
+        android:visibility="gone">
+
+        <WebView
+            android:id="@+id/web_view"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@color/surface"
+            android:contentDescription="@string/app_name" />
+
+        <ProgressBar
+            android:id="@+id/progress"
+            style="?android:attr/progressBarStyleHorizontal"
+            android:layout_width="match_parent"
+            android:layout_height="4dp"
+            android:layout_gravity="top"
+            android:indeterminate="true"
+            android:indeterminateTint="@color/gold_pressed"
+            android:visibility="gone" />
+
+        <FrameLayout
+            android:id="@+id/error_panel"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@drawable/bg_setup"
+            android:visibility="gone">
+
+            <View
+                android:layout_width="330dp"
+                android:layout_height="330dp"
+                android:layout_gravity="top|end"
+                android:layout_marginTop="-165dp"
+                android:layout_marginEnd="-150dp"
+                android:background="@drawable/bg_halo_gold"
+                android:importantForAccessibility="no" />
+
+            <ScrollView
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:fillViewport="true"
+                android:overScrollMode="never">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center"
+                    android:orientation="vertical"
+                    android:paddingStart="32dp"
+                    android:paddingTop="44dp"
+                    android:paddingEnd="32dp"
+                    android:paddingBottom="44dp">
+
+                    <FrameLayout
+                        android:layout_width="76dp"
+                        android:layout_height="76dp"
+                        android:background="@drawable/bg_error_badge"
+                        android:elevation="2dp">
+
+                        <ImageView
+                            android:layout_width="34dp"
+                            android:layout_height="34dp"
+                            android:layout_gravity="center"
+                            android:contentDescription="@null"
+                            android:importantForAccessibility="no"
+                            android:src="@drawable/ic_cloud_off" />
+                    </FrameLayout>
+
+                    <TextView
+                        android:id="@+id/error_title"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="24dp"
+                        android:accessibilityLiveRegion="polite"
+                        android:fontFamily="sans-serif-black"
+                        android:gravity="center"
+                        android:includeFontPadding="false"
+                        android:text="@string/connection_problem"
+                        android:textColor="@color/ink"
+                        android:textSize="28sp" />
+
+                    <TextView
+                        android:id="@+id/error_message"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:gravity="center"
+                        android:lineSpacingExtra="3dp"
+                        android:text="@string/connection_problem_default"
+                        android:textColor="@color/muted_ink"
+                        android:textSize="15sp" />
+
+                    <Button
+                        android:id="@+id/retry_button"
+                        android:layout_width="match_parent"
+                        android:layout_height="58dp"
+                        android:layout_marginTop="28dp"
+                        android:background="@drawable/bg_button_primary"
+                        android:fontFamily="sans-serif-bold"
+                        android:minHeight="0dp"
+                        android:minWidth="0dp"
+                        android:text="@string/retry"
+                        android:textAllCaps="false"
+                        android:textColor="@color/button_primary_text"
+                        android:textSize="16sp" />
+
+                    <Button
+                        android:id="@+id/change_server_button"
+                        android:layout_width="match_parent"
+                        android:layout_height="58dp"
+                        android:layout_marginTop="12dp"
+                        android:background="@drawable/bg_button_secondary"
+                        android:fontFamily="sans-serif-bold"
+                        android:minHeight="0dp"
+                        android:minWidth="0dp"
+                        android:text="@string/change_server"
+                        android:textAllCaps="false"
+                        android:textColor="@color/ink"
+                        android:textSize="16sp" />
+                </LinearLayout>
+            </ScrollView>
+        </FrameLayout>
+    </FrameLayout>
+
+</FrameLayout>

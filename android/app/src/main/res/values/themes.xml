@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="MosaicBudgetThemeBase" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:statusBarColor">@color/status_bar</item>
+        <item name="android:navigationBarColor">@color/navigation_bar</item>
+        <item name="android:windowBackground">@drawable/bg_setup</item>
+        <item name="android:colorAccent">@color/gold_pressed</item>
+        <item name="android:windowDisablePreview">false</item>
+    </style>
+
+    <style name="Theme.MosaicBudget" parent="@style/MosaicBudgetThemeBase" />
+
+    <style name="Theme.MosaicBudget.Starting" parent="@style/Theme.MosaicBudget">
+        <item name="android:windowBackground">@drawable/splash_background</item>
+    </style>
+</resources>

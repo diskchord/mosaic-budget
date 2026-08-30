@@ -26,6 +26,9 @@ from .structure import availability_dict, lifetime_active, month_exclusion_ids, 
 from .transaction_labels import transaction_display_payee
 
 
+UNASSIGNED_PREVIEW_LIMIT = 200
+
+
 def ensure_month_records(db: Session, workspace_id: uuid.UUID, month: date) -> None:
     existing = set(
         db.scalars(
@@ -429,8 +432,10 @@ def get_budget_state(db: Session, workspace_id: uuid.UUID, month: date) -> dict[
         )
         .options(selectinload(BudgetTransaction.account), selectinload(BudgetTransaction.allocations))
         .order_by(BudgetTransaction.effective_date.desc(), BudgetTransaction.created_at.desc())
-        .limit(200)
+        .limit(UNASSIGNED_PREVIEW_LIMIT + 1)
     ).all()
+    unassigned_has_more = len(unassigned) > UNASSIGNED_PREVIEW_LIMIT
+    unassigned = unassigned[:UNASSIGNED_PREVIEW_LIMIT]
 
     account_catalog = db.scalars(
         select(Account)
@@ -466,6 +471,7 @@ def get_budget_state(db: Session, workspace_id: uuid.UUID, month: date) -> dict[
         },
         "category_catalog": category_catalog,
         "unassigned": [serialize_transaction(transaction) for transaction in unassigned],
+        "unassigned_has_more": unassigned_has_more,
         "accounts": [serialize_account(account) for account in accounts],
         "account_catalog": [serialize_account(account) for account in account_catalog],
         "connections": [

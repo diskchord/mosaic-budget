@@ -1,6 +1,6 @@
 SHELL := /bin/sh
 
-.PHONY: up down logs test verify demo secrets backup ps
+.PHONY: up down logs test verify demo secrets backup ps android-apk android-lint android-check
 
 up:
 	docker compose up -d --build
@@ -24,6 +24,15 @@ verify:
 	sh -n scripts/generate-secrets.sh ops/backups/backup.sh
 	python3 -c "import json, pathlib, xml.etree.ElementTree as ET; root = pathlib.Path('.'); json.loads((root / 'backend/app/static/manifest.webmanifest').read_text()); ET.parse(root / 'backend/app/static/icon.svg')"
 	cd backend && PYTHONPATH=.$${PYTHONPATH:+:$$PYTHONPATH} pytest
+
+android-apk:
+	cd android && ./gradlew :app:assembleDebug
+
+android-lint:
+	cd android && ./gradlew :app:lintDebug
+
+android-check:
+	cd android && ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:lintDebug
 
 demo:
 	docker compose run --rm web python -m app.seed_demo

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Mosaic Budget</string>
+    <string name="setup_eyebrow">YOUR BUDGET, IN YOUR HANDS</string>
+    <string name="setup_title">Connect to your Mosaic</string>
+    <string name="setup_description">Enter the secure address of your remote Mosaic Budget server. You’ll sign in with your email and password on the next screen.</string>
+    <string name="server_label">Server address</string>
+    <string name="server_hint">https://budget.example.com</string>
+    <string name="connect">Connect securely</string>
+    <string name="connection_privacy">HTTPS only · Credentials go directly to your server</string>
+    <string name="setup_footer">Self-hosted. Calm by design. Your financial data stays yours.</string>
+    <string name="connection_problem">We couldn’t open Mosaic</string>
+    <string name="connection_problem_default">Check your connection and make sure your server is available over HTTPS.</string>
+    <string name="retry">Try again</string>
+    <string name="change_server">Change server</string>
+    <string name="mosaic_logo_description">Mosaic Budget logo</string>
+</resources>

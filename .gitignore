@@ -42,3 +42,9 @@ dist/
 *.swp
 *~
 .DS_Store
+
+# Android build output and local SDK configuration
+/android/.gradle/
+/android/.idea/
+/android/local.properties
+/android/**/build/

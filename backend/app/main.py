@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import HTMLResponse, ORJSONResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -18,7 +18,6 @@ base_dir = Path(__file__).resolve().parent
 app = FastAPI(
     title=settings.app_name,
     version="0.2.0",
-    default_response_class=ORJSONResponse,
     docs_url=None,
     redoc_url=None,
 )

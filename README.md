@@ -68,6 +68,25 @@ make demo
 The demo is idempotent, but it writes sample data into the active workspace. Use
 it only on a new or disposable installation.
 
+## Android companion
+
+The `android/` project packages the complete responsive Mosaic interface in a
+hardened native shell. It keeps the touch-and-hold transaction drag workflow,
+all seven themes, live updates, analytics, rules, and owner tools in sync with
+the remote server rather than maintaining a separate mobile implementation.
+
+```bash
+cd android
+./gradlew :app:assembleDebug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+On first launch, enter the HTTPS root origin of the Mosaic server, then sign in
+with that server's email and password. The APK stores only the server origin;
+credentials go directly to the server and the session remains in private
+first-party WebView storage. See the [Android guide](android/README.md) for
+release signing and deployment requirements.
+
 ## Connect a bank
 
 SimpleFIN is optional; Mosaic also works with manual transactions.
@@ -120,6 +139,9 @@ tests in the application container.
 | `make ps` | Show service health and status |
 | `make test` | Run tests in Docker |
 | `make verify` | Run local static checks and tests |
+| `make android-apk` | Build the installable debug Android APK |
+| `make android-lint` | Run Android lint against the companion app |
+| `make android-check` | Test, build, and lint the Android companion |
 | `make backup` | Create and restore-verify a database backup |
 | `make demo` | Add sample data to a new workspace |
 | `make down` | Stop Mosaic without deleting its data volume |

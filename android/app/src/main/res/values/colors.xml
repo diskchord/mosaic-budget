@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="setup_background_start">#FFF9EB</color>
+    <color name="setup_background_end">#F3EFE4</color>
+    <color name="surface">#FFFCF5</color>
+    <color name="surface_pressed">#F6EFDf</color>
+    <color name="ink">#24211D</color>
+    <color name="muted_ink">#6D655B</color>
+    <color name="line">#E5D7B8</color>
+    <color name="gold">#FFBF2F</color>
+    <color name="gold_pressed">#E2A215</color>
+    <color name="gold_ink">#2C2105</color>
+    <color name="green">#0A9577</color>
+    <color name="error">#A52A23</color>
+    <color name="error_surface">#FFF0ED</color>
+    <color name="launcher_background">#211F1B</color>
+    <color name="status_bar">#FFF9EB</color>
+    <color name="navigation_bar">#211F1B</color>
+    <color name="halo_gold">#36FFC84D</color>
+    <color name="halo_green">#2506AC88</color>
+</resources>

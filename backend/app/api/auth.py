@@ -5,7 +5,7 @@ import uuid
 from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from fastapi.responses import ORJSONResponse
+from fastapi.responses import JSONResponse
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
@@ -110,7 +110,7 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
         object_id=user.id,
     )
     db.commit()
-    response = ORJSONResponse({"user": user_payload(user), "app_name": settings.app_name})
+    response = JSONResponse({"user": user_payload(user), "app_name": settings.app_name})
     set_session_cookies(response, tokens)
     return response
 
@@ -127,7 +127,7 @@ def logout(request: Request, auth: AuthContext = Depends(require_write), db: Ses
         object_id=auth.user.id,
     )
     db.commit()
-    response = ORJSONResponse({"ok": True})
+    response = JSONResponse({"ok": True})
     clear_session_cookies(response)
     return response
 
@@ -218,7 +218,7 @@ def delete_session(
     is_current = record.id == auth.session.id
     db.delete(record)
     db.commit()
-    response = ORJSONResponse({"ok": True, "signed_out": is_current})
+    response = JSONResponse({"ok": True, "signed_out": is_current})
     if is_current:
         clear_session_cookies(response)
     return response

@@ -7,7 +7,7 @@ Mosaic Budget is organized around two priorities: a low-friction phone interface
 ## Runtime topology
 
 ```text
-Browser / installed PWA
+Browser / installed PWA / Android companion
         |
         | HTTPS, JSON, server-sent events
         v
@@ -25,6 +25,13 @@ Verified backup service --> mounted/off-host backup storage
 ```
 
 `web` and `worker` are intentionally stateless. PostgreSQL is the sole authority for financial records, sessions, jobs, incidents, audit events, and pending notification deliveries.
+
+The Android companion loads the configured server as a top-level, exact-origin
+HTTPS page in a hardened platform WebView. This preserves the same cookie/CSRF
+session, server-sent updates, responsive themes, and touch drag behavior as the
+PWA. Its native layer stores only the server origin and supplies setup, TLS and
+offline recovery, Android Back integration, and launcher packaging; it does not
+duplicate the financial API or queue writes.
 
 ## Source ledger and editable ledger
 

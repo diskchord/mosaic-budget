@@ -43,7 +43,7 @@ const MAX_BULK_TRANSACTIONS = 200;
 
 const ICONS = {
   budget: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 19V9M10 19V4M16 19v-7M22 19H2"/></svg>',
-  transactions: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M7 7h11l-3-3M17 17H6l3 3M18 7l-3 3M6 17l3-3"/></svg>',
+  transactions: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16m0 0-4-4m4 4-4 4M20 17H4m0 0 4 4m-4-4 4-4"/></svg>',
   analytics: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V11M10 19V5M16 19v-6M22 19H2"/><path d="m4 7 5-3 6 4 5-5"/></svg>',
   rules: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M7 12h10M10 18h4"/><circle cx="7" cy="6" r="2" fill="currentColor" stroke="none"/><circle cx="17" cy="12" r="2" fill="currentColor" stroke="none"/><circle cx="10" cy="18" r="2" fill="currentColor" stroke="none"/></svg>',
   more: '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>',
@@ -232,6 +232,11 @@ function openModal({ title, body, footer = '', className = '', onMount = null })
   const backdrop = $('.modal-backdrop', root);
   $('.modal-close', root).addEventListener('click', () => closeModal());
   backdrop.addEventListener('click', event => { if (event.target === backdrop && !state.formDirty) closeModal(); });
+  const markFormDirty = event => {
+    if (event.target.matches('input, select, textarea') && event.target.closest('form')) state.formDirty = true;
+  };
+  root.addEventListener('input', markFormDirty);
+  root.addEventListener('change', markFormDirty);
   document.addEventListener('keydown', modalEscape, { once: true });
   hydrateIcons(root);
   if (onMount) onMount(root);
@@ -339,7 +344,7 @@ function updateNavigation() {
   $('#month-control').classList.toggle('hidden', !['budget', 'transactions', 'rules'].includes(state.view));
   const unsortedCount = trayTransactions().length;
   $('#inbox-button').classList.toggle('hidden', !unsortedCount || state.view !== 'budget');
-  $('#inbox-count').textContent = unsortedCount;
+  $('#inbox-count').textContent = state.budget?.unassigned_has_more ? `${unsortedCount}+` : unsortedCount;
 }
 
 async function setView(view) {
@@ -508,7 +513,7 @@ function renderBudget() {
   }).join('');
 
   $('#app-view').innerHTML = `
-    <header class="view-header"><div><h1>${monthLabel(state.month)}</h1><p>Give every planned dollar a job.</p></div><div class="view-actions"><button class="button button--soft add-manual" type="button">+ Cash transaction</button></div></header>
+    <header class="view-header"><div><h1>${monthLabel(state.month)}</h1><p>Give every planned dollar a job.</p></div><div class="view-actions"><button class="button button--primary add-manual" type="button">+ Cash transaction</button></div></header>
     <section class="summary-card">
       <div class="summary-top"><div><small>LEFT TO ASSIGN</small><div class="summary-balance ${leftUnits < 0n ? 'negative' : ''}">${money(summary.left_to_assign)}</div><div class="summary-state">${leftUnits === 0n ? 'Every planned dollar has a home.' : leftUnits > 0n ? 'Still available to plan.' : 'Planned spending is over income.'}</div></div></div>
       <div class="summary-grid">
@@ -975,7 +980,7 @@ function openCategoryEditor(categoryId = null, sectionId = null) {
       ${found ? `<div class="availability-summary full"><strong>Month availability</strong><span>${escapeHtml(availabilityDescription(found))}</span></div>` : startMonthMarkup('category')}
     </form>
     ${found ? '<div class="form-section"><button class="button button--danger remove-category" type="button">Remove from budget months…</button></div>' : ''}`,
-    footer: '<button class="button modal-cancel" type="button">Cancel</button><button class="button button--primary modal-save" type="button">Save</button>',
+    footer: '<button class="button modal-cancel" type="button">Cancel</button><button class="button button--primary modal-save" type="submit" form="category-form">Save</button>',
     onMount(root) {
       $('.modal-cancel', root).addEventListener('click', closeModal);
       if (!found) bindStartMonthControl(root, 'category');
@@ -999,7 +1004,7 @@ function openCategoryEditor(categoryId = null, sectionId = null) {
         try {
           if (found) {
             body.version = found.version;
-            await withConflict(current => api(`/api/categories/${found.id}`, { method: 'PATCH', body: current }), body, 'category');
+            await withConflict(current => api(`/api/categories/${found.id}?current_month=${encodeURIComponent(state.month)}`, { method: 'PATCH', body: current }), body, 'category');
           } else {
             body.starts_month = readStartMonth(root, 'category');
             await api('/api/categories', { method: 'POST', body });
@@ -1007,7 +1012,6 @@ function openCategoryEditor(categoryId = null, sectionId = null) {
           closeModal(); await refreshCurrentView();
         } catch (error) { toast(error.message, 'error'); } finally { setButtonBusy(button, false); }
       };
-      $('.modal-save', root).addEventListener('click', save);
       $('#category-form', root).addEventListener('submit', event => { event.preventDefault(); save(); });
     },
   });
@@ -1962,7 +1966,7 @@ function openManualTransaction() {
       <label>Category<select id="manual-category"><option value="">Leave unassigned</option>${categoryOptions()}</select></label>
       <label class="full">Note<textarea id="manual-note" maxlength="10000"></textarea></label>
     </form>`,
-    footer: '<button class="button modal-cancel" type="button">Cancel</button><button class="button button--primary create-manual" type="button">Add transaction</button>',
+    footer: '<button class="button modal-cancel" type="button">Cancel</button><button class="button button--primary create-manual" type="submit" form="manual-form">Add transaction</button>',
     onMount(root) {
       $('.modal-cancel', root).addEventListener('click', closeModal);
       const save = async () => {
@@ -1985,7 +1989,6 @@ function openManualTransaction() {
           closeModal(); toast('Manual transaction added'); await refreshCurrentView();
         } catch (error) { toast(error.message, 'error'); } finally { setButtonBusy(button, false); }
       };
-      $('.create-manual', root).addEventListener('click', save);
       $('#manual-form', root).addEventListener('submit', event => { event.preventDefault(); save(); });
     },
   });
@@ -2134,8 +2137,8 @@ function conditionRowMarkup(condition) {
   const operators = FIELD_OPERATORS[condition.field] || ['is','is_not'];
   if (!operators.includes(condition.operator)) condition.operator = operators[0];
   return `<div class="condition-row" data-condition='${escapeHtml(JSON.stringify(condition))}'>
-    <label>Field<select class="condition-field">${Object.entries(RULE_FIELDS).map(([value,label]) => `<option value="${value}" ${condition.field === value ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('')}</select></label>
-    <label>Comparison<select class="condition-operator">${operators.map(value => `<option value="${value}" ${condition.operator === value ? 'selected' : ''}>${escapeHtml(RULE_OPERATORS[value])}</option>`).join('')}</select></label>
+    <label class="condition-field-control">Field<select class="condition-field">${Object.entries(RULE_FIELDS).map(([value,label]) => `<option value="${value}" ${condition.field === value ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('')}</select></label>
+    <label class="condition-operator-control">Comparison<select class="condition-operator">${operators.map(value => `<option value="${value}" ${condition.operator === value ? 'selected' : ''}>${escapeHtml(RULE_OPERATORS[value])}</option>`).join('')}</select></label>
     ${conditionValueMarkup(condition)}
     <button class="row-remove remove-condition" type="button" aria-label="Remove condition">×</button>
   </div>`;
@@ -2161,7 +2164,7 @@ function actionValueMarkup(action) {
 
 function actionRowMarkup(action) {
   return `<div class="action-row" data-action-type="${escapeHtml(action.type)}">
-    <label>Action<select class="action-type">${Object.entries(ACTION_LABELS).map(([value,label]) => `<option value="${value}" ${action.type === value ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('')}</select></label>
+    <label class="action-type-control">Action<select class="action-type">${Object.entries(ACTION_LABELS).map(([value,label]) => `<option value="${value}" ${action.type === value ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('')}</select></label>
     ${actionValueMarkup(action)}
     <button class="row-remove remove-action" type="button" aria-label="Remove action">×</button>
   </div>`;
@@ -2786,6 +2789,50 @@ function openMonthPicker() {
   });
 }
 
+function handleLayeredBack({ returnToBudget = false } = {}) {
+  try {
+    if (state.cancelBubbleDrag) {
+      state.cancelBubbleDrag();
+      return 'handled';
+    }
+    if (state.modalOpen) {
+      if (state.formDirty) return 'dirty';
+      closeModal();
+      return 'handled';
+    }
+    if (selectedTrayTransactionIds().length) {
+      clearBubbleSelection();
+      return 'handled';
+    }
+    if (selectedListTransactions().length) {
+      clearTransactionListSelection();
+      return 'handled';
+    }
+    if (state.trayOpen) {
+      closeTray();
+      return 'handled';
+    }
+    if (returnToBudget && state.me && state.view !== 'budget') {
+      void setView('budget').catch(error => {
+        if (error.status !== 401) toast(error.message || 'Could not open the budget.', 'error');
+      });
+      return 'handled';
+    }
+  } catch (error) {
+    console.error('Could not handle back navigation.', error);
+  }
+  return 'unhandled';
+}
+
+// The Android host calls these synchronously and decides whether to consume the
+// system Back event or show its own discard-changes confirmation.
+window.mosaicAndroidBack = () => handleLayeredBack({ returnToBudget: true });
+window.mosaicAndroidDiscardChanges = () => {
+  if (!state.modalOpen) return 'unhandled';
+  closeModal();
+  return 'handled';
+};
+
 function connectEvents() {
   state.eventSource?.close();
   const source = new EventSource('/api/events', { withCredentials: true });
@@ -2838,19 +2885,7 @@ async function initialize() {
   $('#tray-assign-selection').addEventListener('click', openSelectedAssignment);
   document.addEventListener('keydown', event => {
     if (event.key !== 'Escape' || state.modalOpen) return;
-    if (state.cancelBubbleDrag) {
-      event.preventDefault();
-      state.cancelBubbleDrag();
-    } else if (selectedTrayTransactionIds().length) {
-      event.preventDefault();
-      clearBubbleSelection();
-    } else if (selectedListTransactions().length) {
-      event.preventDefault();
-      clearTransactionListSelection();
-    } else if (state.trayOpen) {
-      event.preventDefault();
-      closeTray();
-    }
+    if (handleLayeredBack() === 'handled') event.preventDefault();
   });
 
   $('#login-form').addEventListener('submit', async event => {

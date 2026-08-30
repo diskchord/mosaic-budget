@@ -115,6 +115,25 @@ Balance-alert messages deliberately include the account name, current balance, a
 
 An incorrect email or password is reported directly beneath the sign-in form. The separate session-ended notification is reserved for a session that expires after a successful sign-in, so an ordinary credential mistake does not produce two competing messages.
 
+### Android companion
+
+Install the companion APK on Android 8 or newer. On first launch, enter the
+HTTPS root address of the Mosaic server, such as
+`https://budget.example.com`, then use the same email and password as the web
+app. Android password-manager autofill is supported; the native shell stores
+only the server address and leaves the session in private first-party WebView
+storage.
+
+The Android app presents the complete responsive interface, including themes,
+rules, analytics, administration, and touch-and-hold transaction dragging.
+Android Back closes the active drag, dialog, selection, or transaction tray
+before leaving the app. If a form contains unsaved changes, Back asks before
+discarding it. At the Budget root, Back also offers **Change server**.
+
+The companion accepts only a root HTTPS origin with a system-trusted
+certificate. It deliberately refuses HTTP, embedded URL credentials,
+subdirectory deployments, mixed content, and certificate bypasses.
+
 ## Conflicts
 
 When another device changes the same object first, Mosaic rejects the stale save and shows the current server version. Review the new value, then keep it or deliberately reapply yours. Nothing is overwritten silently.
