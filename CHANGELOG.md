@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added mouse, touch, and keyboard reordering for budget sections, categories, and rules, including cross-section category moves, fixed Income placement, phase-safe atomic rule ordering, conflict recovery, and focus restoration
+- Kept **To sort** open while inspecting a transaction so canceling returns smoothly to the same sorting context
 - Made sorting confirmations click- and drag-through so stacked status bubbles no longer block transaction controls, while keeping their Undo buttons interactive
 - Added an installable Android companion with a polished HTTPS server picker, secure exact-origin WebView isolation, password-manager-compatible sign-in, complete feature parity, touch drag-and-drop, offline recovery, adaptive icons, and safe native Back behavior
 - Prepared the project for public GitHub collaboration with a concise README, Apache 2.0 licensing, CI, issue forms, pull-request guidance, and contribution and vulnerability-reporting policies

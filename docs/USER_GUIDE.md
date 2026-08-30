@@ -6,6 +6,8 @@ The selected month opens on the Budget screen. Income is always first. Each visi
 
 Select a planned value to change it. Planned amounts belong to that individual month. Fund categories carry their cumulative remaining amount between months; ordinary categories start from the selected month's plan.
 
+Use the dotted grip on a section to drag it above or below another expense section. Income is protected at the top. Category grips can reorder categories in one section or move them into another section, including a collapsed or currently empty section. The same controls work with a mouse or touch; when a grip has keyboard focus, the Up and Down arrow keys move it within its current group. The Position field in each section or category editor remains available as a keyboard-friendly alternative and is the way to move a category to another section without dragging.
+
 ## Compare months with Analytics
 
 Open **Analytics** to compare actual activity across an inclusive range of months. Choose the first and last month to see income, spending, net cash flow, transaction coverage, and category activity together. The default range is the trailing 12 months ending with the current month, and a range may contain up to 120 months.
@@ -51,7 +53,7 @@ The **to sort** button opens the shared, month-independent inbox of unsorted act
 
 Drag a checked bubble onto a category to move the entire checked group. Dragging a bubble that is not checked moves only that bubble and leaves the existing selection unchanged. On a touch device, press and hold a bubble before dragging so the inbox can still scroll normally.
 
-For a keyboard-friendly alternative, check the bubbles and choose **Assign selected...**, then choose the destination category. Selecting a bubble normally still opens its transaction editor for individual assignment or splitting.
+For a keyboard-friendly alternative, check the bubbles and choose **Assign selected...**, then choose the destination category. Selecting a bubble normally opens its transaction editor over the inbox for individual assignment or splitting. Canceling the editor returns to the same sorting context, including the current selection.
 
 The target category highlights during the drag. Group assignment is atomic: either every selected transaction is moved into the displayed month and assigned, or none are changed. After a successful drop, the category pulses with its updated amount, the confirmation names the destination month, and the inbox returns smoothly, removes the assigned bubbles, stays open, and places focus on the next available transaction. Moving the budgeting date sets its manual date lock, and assigning the category sets its manual allocation lock, so synchronization and ordinary background rules cannot silently reverse either choice. **Undo** restores the original dates, locks, review state, and complete unassigned group together.
 
@@ -86,6 +88,8 @@ Create a rule from the Rules screen or from a representative transaction. A rule
 - one or more actions,
 - optional permission to override manual decisions, and
 - a stop/continue choice.
+
+Rules are displayed in the same three phases in which they run: clean up, categorize, then finish and flag. Drag a rule's dotted grip to change its order within that phase, or focus the grip and use the Up and Down arrow keys. Moving a rule to a different phase is deliberately kept in the rule editor because it changes when the rule runs, not just its order among peers. A reorder is saved atomically; if the phase changed on another device, Mosaic restores the latest complete order instead of overwriting it.
 
 Preview matching transactions before saving. Historical application can be limited to unassigned records or selected explicitly. Keep merchant rules as narrow as necessary by adding account and amount conditions.
 

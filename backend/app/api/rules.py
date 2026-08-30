@@ -10,14 +10,15 @@ from sqlalchemy import not_, select
 from sqlalchemy.orm import Session, selectinload
 
 from ..db import get_db
-from ..models import Account, Allocation, BudgetTransaction, Category, Rule, RuleRevision, Section
-from ..schemas import RuleRequest, RuleRunRequest, RuleUpdateRequest
+from ..models import Account, Allocation, BudgetTransaction, Category, Rule, RuleRevision, Section, Workspace
+from ..schemas import RuleOrderRequest, RuleRequest, RuleRunRequest, RuleUpdateRequest
 from ..services.audit import write_audit
 from ..services.budgets import serialize_transaction
 from ..services.rules import (
     apply_rules_to_transaction,
     enabled_rules_for_workspace,
     matches_tree,
+    rule_order_columns,
     rule_snapshot,
 )
 from ..utils import next_month, parse_decimal, parse_month, utcnow
@@ -194,6 +195,13 @@ def _rule_for_user(db: Session, rule_id: uuid.UUID, workspace_id: uuid.UUID, *, 
     return rule
 
 
+def _lock_rule_set(db: Session, workspace_id: uuid.UUID) -> None:
+    # A stable parent-row lock serializes creates, archives, phase changes, and
+    # reorders. Row-locking only the current lane would not prevent a concurrent
+    # insert from appearing immediately after its complete-list version check.
+    db.scalar(select(Workspace.id).where(Workspace.id == workspace_id).with_for_update())
+
+
 def _save_revision(db: Session, rule: Rule, user_id: uuid.UUID | None) -> None:
     db.add(
         RuleRevision(
@@ -279,7 +287,7 @@ def list_rules(auth: AuthContext = Depends(current_auth), db: Session = Depends(
     rows = db.scalars(
         select(Rule)
         .where(Rule.workspace_id == auth.user.workspace_id, Rule.archived_at.is_(None))
-        .order_by(Rule.phase, Rule.priority, Rule.created_at)
+        .order_by(*rule_order_columns())
     ).all()
     return {"rules": [rule_snapshot(rule) for rule in rows]}
 
@@ -390,6 +398,7 @@ def create_rule(
     auth: AuthContext = Depends(require_write),
     db: Session = Depends(get_db),
 ) -> dict:
+    _lock_rule_set(db, auth.user.workspace_id)
     _validate_rule(db, auth.user.workspace_id, payload)
     rule = Rule(
         workspace_id=auth.user.workspace_id,
@@ -426,6 +435,80 @@ def create_rule(
     return {"rule": rule_snapshot(rule), **historical}
 
 
+@router.put("/order")
+def reorder_rules(
+    payload: RuleOrderRequest,
+    auth: AuthContext = Depends(require_write),
+    db: Session = Depends(get_db),
+) -> dict:
+    _lock_rule_set(db, auth.user.workspace_id)
+    rows = db.scalars(
+        select(Rule)
+        .where(
+            Rule.workspace_id == auth.user.workspace_id,
+            Rule.phase == payload.phase,
+            Rule.archived_at.is_(None),
+        )
+        .order_by(Rule.id)
+        .with_for_update()
+    ).all()
+    current = sorted(rows, key=lambda rule: (rule.priority, rule.created_at, str(rule.id)))
+    current_by_id = {rule.id: rule for rule in current}
+    requested_ids = [item.id for item in payload.rules]
+    versions_match = all(
+        current_by_id.get(item.id) is not None and current_by_id[item.id].version == item.version
+        for item in payload.rules
+    )
+    if set(requested_ids) != set(current_by_id) or not versions_match:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "These rules changed on another device. The latest order has been restored.",
+                "current": [rule_snapshot(rule) for rule in current],
+            },
+        )
+
+    if requested_ids == [rule.id for rule in current]:
+        return {"rules": [rule_snapshot(rule) for rule in current]}
+
+    ordered = [current_by_id[rule_id] for rule_id in requested_ids]
+    priority_slots = sorted(rule.priority for rule in current)
+    if len(priority_slots) != len(set(priority_slots)):
+        priority_slots = list(range(len(ordered)))
+    before = {
+        "phase": payload.phase,
+        "rules": [
+            {"id": str(rule.id), "priority": rule.priority, "version": rule.version}
+            for rule in current
+        ],
+    }
+    for rule, priority in zip(ordered, priority_slots, strict=True):
+        if rule.priority == priority:
+            continue
+        rule.priority = priority
+        rule.version += 1
+        _save_revision(db, rule, auth.user.id)
+    after = {
+        "phase": payload.phase,
+        "rules": [
+            {"id": str(rule.id), "priority": rule.priority, "version": rule.version}
+            for rule in ordered
+        ],
+    }
+    write_audit(
+        db,
+        workspace_id=auth.user.workspace_id,
+        actor_user_id=auth.user.id,
+        action="rules.reordered",
+        object_type="rule_set",
+        before=before,
+        after=after,
+        detail={"phase": payload.phase, "rule_ids": [str(rule.id) for rule in ordered]},
+    )
+    db.commit()
+    return {"rules": [rule_snapshot(rule) for rule in ordered]}
+
+
 @router.patch("/{rule_id}")
 def update_rule(
     rule_id: uuid.UUID,
@@ -433,6 +516,7 @@ def update_rule(
     auth: AuthContext = Depends(require_write),
     db: Session = Depends(get_db),
 ) -> dict:
+    _lock_rule_set(db, auth.user.workspace_id)
     _validate_rule(db, auth.user.workspace_id, payload)
     rule = _rule_for_user(db, rule_id, auth.user.workspace_id, lock=True)
     if rule.version != payload.version:
@@ -500,6 +584,7 @@ def archive_rule(
     auth: AuthContext = Depends(require_write),
     db: Session = Depends(get_db),
 ) -> dict:
+    _lock_rule_set(db, auth.user.workspace_id)
     rule = _rule_for_user(db, rule_id, auth.user.workspace_id, lock=True)
     if rule.version != version:
         raise HTTPException(status_code=409, detail={"message": "Rule conflict", "current": rule_snapshot(rule)})

@@ -21,12 +21,16 @@ class RuleError(ValueError):
     pass
 
 
-def enabled_rules_for_workspace(db: Session, workspace_id: uuid.UUID) -> list[Rule]:
+def rule_order_columns():
     phase_sort = case(
-        (Rule.phase == "cleanup", 0),
-        (Rule.phase == "categorize", 1),
-        else_=2,
+        (Rule.phase == "cleanup", PHASE_ORDER["cleanup"]),
+        (Rule.phase == "categorize", PHASE_ORDER["categorize"]),
+        else_=PHASE_ORDER["finish"],
     )
+    return phase_sort, Rule.priority, Rule.created_at, Rule.id
+
+
+def enabled_rules_for_workspace(db: Session, workspace_id: uuid.UUID) -> list[Rule]:
     return db.scalars(
         select(Rule)
         .where(
@@ -34,7 +38,7 @@ def enabled_rules_for_workspace(db: Session, workspace_id: uuid.UUID) -> list[Ru
             Rule.enabled.is_(True),
             Rule.archived_at.is_(None),
         )
-        .order_by(phase_sort, Rule.priority, Rule.created_at)
+        .order_by(*rule_order_columns())
     ).all()
 
 

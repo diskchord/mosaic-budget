@@ -29,9 +29,13 @@ const state = {
   selectionAnchorId: null,
   dragInProgress: false,
   cancelBubbleDrag: null,
+  cancelReorderDrag: null,
   assignmentInFlight: false,
   modalOpen: false,
+  modalReturnFocus: null,
+  modalInertBackgrounds: [],
   formDirty: false,
+  transactionEditorLoadSequence: 0,
   budgetLoadSequence: 0,
   eventSource: null,
   eventReloadTimer: null,
@@ -217,7 +221,17 @@ function setButtonBusy(button, busy, label = 'Working…') {
   else { button.disabled = false; button.textContent = button.dataset.original || button.textContent; }
 }
 
-function openModal({ title, body, footer = '', className = '', onMount = null }) {
+function openModal({ title, body, footer = '', className = '', returnFocus = null, onMount = null }) {
+  state.transactionEditorLoadSequence += 1;
+  const focusTarget = returnFocus || document.activeElement;
+  if (!state.modalOpen || returnFocus) {
+    state.modalReturnFocus = typeof focusTarget === 'function' || focusTarget instanceof HTMLElement ? focusTarget : null;
+  }
+  if (!state.modalOpen) {
+    state.modalInertBackgrounds = [$('#app-shell'), $('#transaction-tray')]
+      .filter(element => !element.hasAttribute('inert'));
+    state.modalInertBackgrounds.forEach(element => element.setAttribute('inert', ''));
+  }
   state.modalOpen = true;
   state.formDirty = false;
   const root = $('#modal-root');
@@ -253,9 +267,22 @@ function modalEscape(event) {
 }
 
 function closeModal() {
+  const returnFocus = state.modalReturnFocus;
+  const inertBackgrounds = state.modalInertBackgrounds;
   $('#modal-root').innerHTML = '';
   state.modalOpen = false;
+  state.modalReturnFocus = null;
+  state.modalInertBackgrounds = [];
   state.formDirty = false;
+  inertBackgrounds.forEach(element => {
+    if (element.id !== 'transaction-tray' || state.trayOpen) element.removeAttribute('inert');
+  });
+  setTimeout(() => {
+    const focusTarget = typeof returnFocus === 'function' ? returnFocus() : returnFocus;
+    if (!state.modalOpen && focusTarget?.isConnected && !focusTarget.closest('[inert]')) {
+      focusTarget.focus({ preventScroll: true });
+    }
+  }, 0);
 }
 
 function confirmDialog({ title, message, confirmText = 'Confirm', danger = false, inputLabel = '', expected = '' }) {
@@ -348,6 +375,7 @@ function updateNavigation() {
 }
 
 async function setView(view) {
+  state.cancelReorderDrag?.();
   if (state.trayOpen) closeTray({ restoreFocus: false });
   if (view !== 'transactions') clearTransactionListSelection();
   state.view = view;
@@ -473,6 +501,7 @@ function transactionById(id) {
 }
 
 function renderBudget() {
+  const reorderFocus = currentReorderFocus();
   const data = state.budget;
   const summary = data.summary;
   const leftUnits = toUnits(summary.left_to_assign);
@@ -489,7 +518,8 @@ function renderBudget() {
       const progressAmount = section.is_income ? category.activity : category.remaining;
       const ratio = planned > 0n ? Math.max(0, Math.min(1.25, Number(used * 10000n / planned) / 10000)) : (used > 0n ? 1.25 : 0);
       const over = !section.is_income && remaining < 0n;
-      return `<article class="category-row" data-category-id="${category.id}" data-section-id="${section.id}">
+      return `<article class="category-row" data-category-id="${category.id}" data-section-id="${section.id}" data-sort-order="${category.sort_order}" data-version="${category.version}">
+        <button class="reorder-handle category-reorder-handle" type="button" aria-label="Reorder ${escapeHtml(category.name)}" aria-describedby="budget-reorder-help" title="Drag to reorder"><span aria-hidden="true">⠿</span></button>
         <div class="category-main" role="button" tabindex="0" aria-label="View ${escapeHtml(category.name)} transactions">
           <div class="category-name"><span>${escapeHtml(category.name)}</span>${category.rollover ? '<span class="fund-badge">Fund</span>' : ''}</div>
           <div class="category-sub">${section.is_income ? `${money(category.activity)} received` : `${money(unitsToString(used))} used`}</div>
@@ -501,11 +531,11 @@ function renderBudget() {
         <div class="progress-track" aria-hidden="true"><div class="progress-bar ${over ? 'over' : ''}" style="width:${Math.min(100, ratio * 100)}%"></div></div>
       </article>`;
     }).join('');
-    return `<section class="section-card ${section.is_income ? 'income' : ''} ${collapsed ? 'collapsed' : ''}" data-section-id="${section.id}">
+    return `<section class="section-card ${section.is_income ? 'income' : ''} ${collapsed ? 'collapsed' : ''}" data-section-id="${section.id}" data-sort-order="${section.sort_order}" data-version="${section.version}">
       <header class="section-header">
         <span class="section-icon" data-icon="${escapeHtml(section.icon || 'wallet')}"></span>
         <button class="section-title collapse-section" data-section-id="${section.id}" type="button" aria-expanded="${collapsed ? 'false' : 'true'}" aria-label="${collapsed ? 'Expand' : 'Collapse'} ${escapeHtml(section.name)}"><h2>${escapeHtml(section.name)}</h2><small>${section.categories.length} categor${section.categories.length === 1 ? 'y' : 'ies'}</small></button>
-        <div class="section-actions"><button class="icon-button collapse-section collapse-chevron" data-section-id="${section.id}" type="button" aria-expanded="${collapsed ? 'false' : 'true'}" aria-label="${collapsed ? 'Expand' : 'Collapse'} ${escapeHtml(section.name)}">⌄</button><button class="icon-button edit-section" data-section-id="${section.id}" type="button" aria-label="Edit ${escapeHtml(section.name)}"><span data-icon="pencil"></span></button></div>
+        <div class="section-actions">${section.is_income ? '' : `<button class="reorder-handle section-reorder-handle" type="button" aria-label="Reorder ${escapeHtml(section.name)} section" aria-describedby="budget-reorder-help" title="Drag to reorder"><span aria-hidden="true">⠿</span></button>`}<button class="icon-button collapse-section collapse-chevron" data-section-id="${section.id}" type="button" aria-expanded="${collapsed ? 'false' : 'true'}" aria-label="${collapsed ? 'Expand' : 'Collapse'} ${escapeHtml(section.name)}">⌄</button><button class="icon-button edit-section" data-section-id="${section.id}" type="button" aria-label="Edit ${escapeHtml(section.name)}"><span data-icon="pencil"></span></button></div>
       </header>
       <div class="category-list">${categories || '<div class="empty-state" style="border:0;border-radius:0">No categories yet.</div>'}</div>
       <button class="add-category" data-section-id="${section.id}" type="button">+ Add category</button>
@@ -513,6 +543,8 @@ function renderBudget() {
   }).join('');
 
   $('#app-view').innerHTML = `
+    <p id="budget-reorder-help" class="sr-only">Drag this handle to change the order. With a keyboard, use the Up and Down arrow keys or the item editor's Position field.</p>
+    <div id="reorder-status" class="sr-only" aria-live="polite" aria-atomic="true"></div>
     <header class="view-header"><div><h1>${monthLabel(state.month)}</h1><p>Give every planned dollar a job.</p></div><div class="view-actions"><button class="button button--primary add-manual" type="button">+ Cash transaction</button></div></header>
     <section class="summary-card">
       <div class="summary-top"><div><small>LEFT TO ASSIGN</small><div class="summary-balance ${leftUnits < 0n ? 'negative' : ''}">${money(summary.left_to_assign)}</div><div class="summary-state">${leftUnits === 0n ? 'Every planned dollar has a home.' : leftUnits > 0n ? 'Still available to plan.' : 'Planned spending is over income.'}</div></div></div>
@@ -541,6 +573,453 @@ function renderBudget() {
   $$('.manage-hidden-structure', $('#app-view')).forEach(button => button.addEventListener('click', openHiddenStructureManager));
   $('.add-manual', $('#app-view')).addEventListener('click', openManualTransaction);
   installBubbleDrag();
+  restoreReorderFocus(reorderFocus);
+}
+
+function announceReorder(message) {
+  const status = $('#reorder-status');
+  if (!status) return;
+  status.textContent = '';
+  requestAnimationFrame(() => { if (status.isConnected) status.textContent = message; });
+}
+
+function reorderElementsAt(x, y) {
+  if (document.elementsFromPoint) return document.elementsFromPoint(x, y);
+  const element = document.elementFromPoint?.(x, y);
+  return element ? [element] : [];
+}
+
+function reorderMatchAt(x, y, selector, root = $('#app-view')) {
+  const element = document.elementFromPoint?.(x, y) || reorderElementsAt(x, y)[0];
+  const match = element?.closest?.(selector);
+  return match && root?.contains(match) ? match : null;
+}
+
+function reorderItemId(element) {
+  return element?.dataset.categoryId || element?.dataset.ruleId || element?.dataset.sectionId || '';
+}
+
+function reorderConfig(handle) {
+  if (handle.matches('.section-reorder-handle')) {
+    return { kind: 'section', itemSelector: '.section-card[data-section-id]:not(.income)' };
+  }
+  if (handle.matches('.category-reorder-handle')) {
+    return { kind: 'category', itemSelector: '.category-row[data-category-id]' };
+  }
+  if (handle.matches('.rule-reorder-handle')) {
+    return { kind: 'rule', itemSelector: '.rule-card[data-rule-id]' };
+  }
+  return null;
+}
+
+function reorderItemName(kind, item) {
+  if (kind === 'section') return state.budget?.sections.find(section => section.id === item.dataset.sectionId)?.name || 'section';
+  if (kind === 'category') return categoryById(item.dataset.categoryId)?.name || 'category';
+  return state.rules.find(rule => rule.id === item.dataset.ruleId)?.name || 'rule';
+}
+
+function buildReorderDrop(kind, container, anchor, before, highlight = null) {
+  const anchorId = reorderItemId(anchor);
+  const targetId = highlight?.dataset.sectionId || highlight?.dataset.rulePhase || '';
+  return {
+    kind,
+    container,
+    anchor,
+    anchorId,
+    before,
+    highlight,
+    key: `${kind}:${targetId}:${anchorId}:${before ? 'before' : 'after'}`,
+  };
+}
+
+function verticalReorderDrop(kind, container, source, y, { highlight = null } = {}) {
+  const selector = kind === 'section' ? '.section-card[data-section-id]:not(.income)'
+    : kind === 'category' ? '.category-row[data-category-id]'
+      : '.rule-card[data-rule-id]';
+  const items = $$(selector, container).filter(item => item !== source && item.getBoundingClientRect().height > 0);
+  if (!items.length) return buildReorderDrop(kind, container, null, true, highlight);
+  const anchor = items.find(item => {
+    const rect = item.getBoundingClientRect();
+    return y < rect.top + rect.height / 2;
+  });
+  if (anchor) return buildReorderDrop(kind, container, anchor, true, highlight);
+  return buildReorderDrop(kind, container, items.at(-1), false, highlight);
+}
+
+function endOfCategorySectionDrop(sectionCard, source) {
+  const list = $('.category-list', sectionCard);
+  const items = $$('.category-row[data-category-id]', list).filter(item => item !== source);
+  return buildReorderDrop('category', list, items.at(-1) || null, false, sectionCard);
+}
+
+function resolveReorderDrop(config, source, x, y) {
+  const root = $('#app-view');
+  if (!root) return null;
+  const topmost = document.elementFromPoint?.(x, y) || reorderElementsAt(x, y)[0];
+  if (!topmost || !root.contains(topmost)) return null;
+  if (config.kind === 'section') {
+    const rect = root.getBoundingClientRect();
+    if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) return null;
+    return verticalReorderDrop('section', root, source, y);
+  }
+  if (config.kind === 'category') {
+    const sectionCard = reorderMatchAt(x, y, '.section-card[data-section-id]', root);
+    if (!sectionCard) return null;
+    const overHeader = reorderMatchAt(x, y, '.section-header', sectionCard);
+    if (overHeader || sectionCard.classList.contains('collapsed')) return endOfCategorySectionDrop(sectionCard, source);
+    return verticalReorderDrop('category', $('.category-list', sectionCard), source, y, { highlight: sectionCard });
+  }
+  const sourcePhase = source.closest('.rule-phase');
+  const targetPhase = reorderMatchAt(x, y, '.rule-phase[data-rule-phase]', root);
+  if (!sourcePhase || targetPhase !== sourcePhase) return null;
+  return verticalReorderDrop('rule', $('.rule-list', sourcePhase), source, y, { highlight: sourcePhase });
+}
+
+function describeReorderDrop(drop) {
+  if (!drop) return 'No drop position';
+  if (drop.anchor) {
+    const name = reorderItemName(drop.kind, drop.anchor);
+    if (drop.kind === 'category') {
+      const sectionName = state.budget?.sections.find(section => section.id === drop.highlight?.dataset.sectionId)?.name || 'section';
+      return `${drop.before ? 'before' : 'after'} ${name} in ${sectionName}`;
+    }
+    return `${drop.before ? 'before' : 'after'} ${name}`;
+  }
+  if (drop.kind === 'category') {
+    const sectionName = state.budget?.sections.find(section => section.id === drop.highlight?.dataset.sectionId)?.name || 'section';
+    return drop.before ? `as the first category in ${sectionName}` : `at the end of ${sectionName}`;
+  }
+  return 'in the current position';
+}
+
+function visibleOrderAfterDrop(ids, sourceId, anchorId, before) {
+  const ordered = ids.filter(id => id !== sourceId);
+  const anchorIndex = anchorId ? ordered.indexOf(anchorId) : -1;
+  const targetIndex = anchorIndex < 0 ? 0 : anchorIndex + (before ? 0 : 1);
+  ordered.splice(targetIndex, 0, sourceId);
+  return ordered;
+}
+
+function sameIdOrder(first, second) {
+  return first.length === second.length && first.every((id, index) => id === second[index]);
+}
+
+function anchoredTargetIndex(sourceOrder, anchorOrder, before, offset = 0) {
+  const sourceIndex = sourceOrder - offset;
+  const anchorIndex = anchorOrder - offset;
+  return Math.max(0, before
+    ? anchorIndex - (sourceIndex < anchorIndex ? 1 : 0)
+    : anchorIndex + 1 - (sourceIndex < anchorIndex ? 1 : 0));
+}
+
+function reorderFocusSelector(kind, id) {
+  if (kind === 'section') return `.section-card[data-section-id="${CSS.escape(id)}"] .section-reorder-handle`;
+  if (kind === 'category') return `.category-row[data-category-id="${CSS.escape(id)}"] .category-reorder-handle`;
+  return `.rule-card[data-rule-id="${CSS.escape(id)}"] .rule-reorder-handle`;
+}
+
+function currentReorderFocus() {
+  const handle = document.activeElement?.closest?.('.reorder-handle');
+  const config = handle ? reorderConfig(handle) : null;
+  const item = config ? handle.closest(config.itemSelector) : null;
+  return config && item ? { kind: config.kind, id: reorderItemId(item) } : null;
+}
+
+function restoreReorderFocus(focus) {
+  if (!focus) return;
+  $(reorderFocusSelector(focus.kind, focus.id))?.focus({ preventScroll: true });
+}
+
+async function persistSectionReorder(source, drop) {
+  const section = state.budget.sections.find(item => item.id === source.dataset.sectionId);
+  const anchor = drop.anchor ? state.budget.sections.find(item => item.id === drop.anchor.dataset.sectionId) : null;
+  if (!section || !anchor) return 'noop';
+  const visibleIds = state.budget.sections.filter(item => !item.is_income).map(item => item.id);
+  const desiredIds = visibleOrderAfterDrop(visibleIds, section.id, anchor.id, drop.before);
+  if (sameIdOrder(visibleIds, desiredIds)) return 'noop';
+  const sortOrder = anchoredTargetIndex(section.sort_order, anchor.sort_order, drop.before, 1);
+  let saved = false;
+  try {
+    await api(`/api/sections/${section.id}`, { method: 'PATCH', body: { version: section.version, sort_order: sortOrder } });
+    saved = true;
+    toast(`${section.name} section reordered`);
+  } catch (error) {
+    toast(error instanceof ConflictError ? 'The section order changed elsewhere. The latest order was restored.' : `Could not reorder ${section.name}: ${error.message}`, 'error');
+  }
+  await refreshCurrentView();
+  $(reorderFocusSelector('section', section.id))?.focus({ preventScroll: true });
+  return saved ? 'saved' : 'failed';
+}
+
+async function persistCategoryReorder(source, drop) {
+  const found = categoryById(source.dataset.categoryId);
+  const targetSection = state.budget.sections.find(section => section.id === drop.highlight?.dataset.sectionId);
+  const anchor = drop.anchor ? categoryById(drop.anchor.dataset.categoryId) : null;
+  if (!found || !targetSection) return 'noop';
+  if (found.section.id === targetSection.id) {
+    const visibleIds = found.section.categories.map(category => category.id);
+    const desiredIds = visibleOrderAfterDrop(visibleIds, found.id, anchor?.id || null, drop.before);
+    if (sameIdOrder(visibleIds, desiredIds)) return 'noop';
+  }
+  let sortOrder = drop.before ? 0 : 2147483647;
+  if (anchor) {
+    sortOrder = found.section.id === targetSection.id
+      ? anchoredTargetIndex(found.sort_order, anchor.sort_order, drop.before)
+      : Math.max(0, anchor.sort_order + (drop.before ? 0 : 1));
+  }
+  let saved = false;
+  try {
+    await api(`/api/categories/${found.id}?current_month=${encodeURIComponent(state.month)}`, {
+      method: 'PATCH',
+      body: { version: found.version, section_id: targetSection.id, sort_order: sortOrder },
+    });
+    saved = true;
+    toast(`${found.name} moved ${targetSection.id === found.section.id ? 'within' : `to`} ${targetSection.name}`);
+  } catch (error) {
+    toast(error instanceof ConflictError ? 'The category order changed elsewhere. The latest order was restored.' : `Could not move ${found.name}: ${error.message}`, 'error');
+  }
+  await refreshCurrentView();
+  $(reorderFocusSelector('category', found.id))?.focus({ preventScroll: true });
+  return saved ? 'saved' : 'failed';
+}
+
+async function persistRuleReorder(source, drop) {
+  const rule = state.rules.find(item => item.id === source.dataset.ruleId);
+  if (!rule || !drop.anchor) return 'noop';
+  const lane = state.rules.filter(item => item.phase === rule.phase);
+  const currentIds = lane.map(item => item.id);
+  const desiredIds = visibleOrderAfterDrop(currentIds, rule.id, drop.anchor.dataset.ruleId, drop.before);
+  if (sameIdOrder(currentIds, desiredIds)) return 'noop';
+  const byId = new Map(lane.map(item => [item.id, item]));
+  let saved = false;
+  try {
+    await api('/api/rules/order', {
+      method: 'PUT',
+      body: {
+        phase: rule.phase,
+        rules: desiredIds.map(id => ({ id, version: byId.get(id).version })),
+      },
+    });
+    saved = true;
+    toast(`${rule.name} reordered`);
+  } catch (error) {
+    toast(error instanceof ConflictError ? error.message : `Could not reorder ${rule.name}: ${error.message}`, 'error');
+  }
+  await refreshCurrentView();
+  $(reorderFocusSelector('rule', rule.id))?.focus({ preventScroll: true });
+  return saved ? 'saved' : 'failed';
+}
+
+function persistReorder(config, source, drop) {
+  if (config.kind === 'section') return persistSectionReorder(source, drop);
+  if (config.kind === 'category') return persistCategoryReorder(source, drop);
+  return persistRuleReorder(source, drop);
+}
+
+function keyboardReorderDrop(config, source, direction) {
+  let container = source.parentElement;
+  let highlight = null;
+  if (config.kind === 'category') {
+    container = source.closest('.category-list');
+    highlight = source.closest('.section-card');
+  } else if (config.kind === 'rule') {
+    container = source.closest('.rule-list');
+    highlight = source.closest('.rule-phase');
+  }
+  const items = $$(config.itemSelector, container);
+  const index = items.indexOf(source);
+  const target = items[index + direction];
+  if (!target) return null;
+  return buildReorderDrop(config.kind, container, target, direction < 0, highlight);
+}
+
+function installReorderDrag() {
+  const root = $('#app-view');
+  if (!root || root.dataset.reorderInstalled === 'true') return;
+  root.dataset.reorderInstalled = 'true';
+  let drag = null;
+
+  const clearDrop = () => {
+    drag?.indicator?.remove();
+    $$('.reorder-drop-active', root).forEach(element => element.classList.remove('reorder-drop-active'));
+  };
+
+  const clean = () => {
+    const current = drag;
+    drag = null;
+    if (!current) return;
+    cancelAnimationFrame(current.scrollFrame);
+    current.ghost?.remove();
+    current.indicator.remove();
+    current.source.classList.remove('is-reordering');
+    $$('.reorder-drop-active', root).forEach(element => element.classList.remove('reorder-drop-active'));
+    document.body.classList.remove('reordering');
+    state.dragInProgress = false;
+    if (state.cancelReorderDrag === clean) state.cancelReorderDrag = null;
+    if (current.handle.hasPointerCapture?.(current.pointerId)) {
+      try { current.handle.releasePointerCapture(current.pointerId); } catch { /* pointer capture may already be gone */ }
+    }
+  };
+
+  const moveGhost = (x, y) => {
+    if (!drag?.ghost) return;
+    const rect = drag.ghost.getBoundingClientRect();
+    const left = Math.max(8, Math.min(x + 15, window.innerWidth - rect.width - 8));
+    const top = Math.max(8, Math.min(y + 15, window.innerHeight - rect.height - 8));
+    drag.ghost.style.transform = `translate3d(${left}px,${top}px,0)`;
+  };
+
+  const showDrop = drop => {
+    if (!drag) return;
+    clearDrop();
+    drag.drop = drop;
+    if (!drop) return;
+    drop.highlight?.classList.add('reorder-drop-active');
+    drag.indicator.className = `reorder-indicator reorder-indicator--${drag.config.kind}`;
+    if (drop.anchor?.parentElement === drop.container) {
+      drop.anchor[drop.before ? 'before' : 'after'](drag.indicator);
+    } else {
+      drop.container.append(drag.indicator);
+    }
+    if (drag.lastDropKey !== drop.key) {
+      drag.lastDropKey = drop.key;
+      announceReorder(`${drag.label}: ${describeReorderDrop(drop)}`);
+    }
+  };
+
+  const updateDrop = (x, y) => {
+    if (!drag?.active) return;
+    showDrop(resolveReorderDrop(drag.config, drag.source, x, y));
+  };
+
+  const runAutoScroll = () => {
+    if (!drag?.active || !drag.scrollDirection) {
+      if (drag) drag.scrollFrame = null;
+      return;
+    }
+    window.scrollBy({ top: drag.scrollDirection, behavior: 'auto' });
+    updateDrop(drag.lastX, drag.lastY);
+    drag.scrollFrame = requestAnimationFrame(runAutoScroll);
+  };
+
+  const updateAutoScroll = (x, y) => {
+    if (!drag?.active) return;
+    drag.lastX = x;
+    drag.lastY = y;
+    const edge = 72;
+    drag.scrollDirection = y < edge ? -14 : y > window.innerHeight - edge ? 14 : 0;
+    if (drag.scrollDirection && drag.scrollFrame === null) drag.scrollFrame = requestAnimationFrame(runAutoScroll);
+  };
+
+  const activate = (x, y) => {
+    if (!drag || drag.active) return;
+    drag.active = true;
+    drag.source.classList.add('is-reordering');
+    drag.ghost = document.createElement('div');
+    drag.ghost.className = 'reorder-ghost';
+    drag.ghost.setAttribute('aria-hidden', 'true');
+    drag.ghost.innerHTML = `<span>⠿</span><strong>${escapeHtml(drag.label)}</strong>`;
+    document.body.append(drag.ghost);
+    document.body.classList.add('reordering');
+    state.dragInProgress = true;
+    moveGhost(x, y);
+    updateDrop(x, y);
+    if (drag.pointerType === 'touch' && navigator.vibrate) navigator.vibrate(16);
+  };
+
+  const finish = async (x, y) => {
+    if (!drag) return;
+    if (drag.active) updateDrop(x, y);
+    const { active, config, source, drop, label } = drag;
+    clean();
+    if (!active || !drop) {
+      if (active) announceReorder(`${label} was not moved.`);
+      return;
+    }
+    state.dragInProgress = true;
+    try {
+      const result = await persistReorder(config, source, drop);
+      if (result === 'saved') announceReorder(`${label} reordered.`);
+      else if (result === 'failed') announceReorder(`${label} could not be reordered. The latest order is shown.`);
+      else announceReorder(`${label} stayed in the same position.`);
+    } finally {
+      state.dragInProgress = false;
+    }
+  };
+
+  root.addEventListener('pointerdown', event => {
+    const handle = event.target.closest('.reorder-handle');
+    if (!handle || !root.contains(handle) || event.button !== 0 || event.isPrimary === false || state.dragInProgress || state.modalOpen) return;
+    const config = reorderConfig(handle);
+    const source = config ? handle.closest(config.itemSelector) : null;
+    if (!config || !source) return;
+    state.cancelBubbleDrag?.();
+    state.cancelReorderDrag?.();
+    handle.focus({ preventScroll: true });
+    drag = {
+      config,
+      source,
+      handle,
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+      startX: event.clientX,
+      startY: event.clientY,
+      lastX: event.clientX,
+      lastY: event.clientY,
+      label: reorderItemName(config.kind, source),
+      active: false,
+      drop: null,
+      ghost: null,
+      indicator: document.createElement('div'),
+      lastDropKey: null,
+      scrollDirection: 0,
+      scrollFrame: null,
+    };
+    state.cancelReorderDrag = clean;
+    state.dragInProgress = true;
+    try { handle.setPointerCapture(event.pointerId); } catch { /* window events still cover the gesture */ }
+    event.preventDefault();
+  });
+
+  window.addEventListener('pointermove', event => {
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (event.pointerType === 'mouse' && event.buttons === 0) { clean(); return; }
+    const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+    if (!drag.active && distance < 6) return;
+    event.preventDefault();
+    activate(event.clientX, event.clientY);
+    moveGhost(event.clientX, event.clientY);
+    updateDrop(event.clientX, event.clientY);
+    updateAutoScroll(event.clientX, event.clientY);
+  });
+
+  window.addEventListener('pointerup', event => {
+    if (drag?.pointerId === event.pointerId) void finish(event.clientX, event.clientY);
+  });
+  window.addEventListener('pointercancel', event => { if (drag?.pointerId === event.pointerId) clean(); });
+  root.addEventListener('lostpointercapture', event => { if (drag?.pointerId === event.pointerId) clean(); });
+  root.addEventListener('contextmenu', event => { if (drag?.active && event.target.closest('.reorder-handle')) event.preventDefault(); });
+  root.addEventListener('keydown', event => {
+    if (!['ArrowUp', 'ArrowDown'].includes(event.key) || state.dragInProgress || state.modalOpen) return;
+    const handle = event.target.closest('.reorder-handle');
+    const config = handle ? reorderConfig(handle) : null;
+    const source = config ? handle.closest(config.itemSelector) : null;
+    if (!config || !source) return;
+    event.preventDefault();
+    const drop = keyboardReorderDrop(config, source, event.key === 'ArrowUp' ? -1 : 1);
+    if (!drop) { announceReorder(`${reorderItemName(config.kind, source)} is already at the edge of this group.`); return; }
+    state.dragInProgress = true;
+    const label = reorderItemName(config.kind, source);
+    void persistReorder(config, source, drop)
+      .then(result => {
+        if (result === 'saved') announceReorder(`${label} reordered.`);
+        else if (result === 'failed') announceReorder(`${label} could not be reordered. The latest order is shown.`);
+        else announceReorder(`${label} stayed in the same position.`);
+      })
+      .finally(() => { state.dragInProgress = false; });
+  });
+  window.addEventListener('blur', () => state.cancelReorderDrag?.());
+  document.addEventListener('visibilitychange', () => { if (document.hidden) state.cancelReorderDrag?.(); });
 }
 
 function analyticsCategoryAmount(category, month) {
@@ -1157,6 +1636,7 @@ async function openTray() {
 
 function closeTray({ restoreFocus = true } = {}) {
   state.cancelBubbleDrag?.();
+  state.transactionEditorLoadSequence += 1;
   state.trayOpen = false;
   clearBubbleSelection();
   const tray = $('#transaction-tray');
@@ -1423,7 +1903,9 @@ function installBubbleDrag() {
   };
 
   const startDrag = ({ bubble, handle, x, y, pointerId = null, touchId = null }) => {
+    state.cancelReorderDrag?.();
     clean();
+    state.transactionEditorLoadSequence += 1;
     const rect = bubble.getBoundingClientRect();
     drag = {
       bubble,
@@ -1492,7 +1974,21 @@ function installBubbleDrag() {
       event.preventDefault();
       toggleBubbleSelection(transactionId);
     } else {
-      openTransactionEditor(transactionId);
+      openTransactionEditor(transactionId, {
+        keepTrayOpen: true,
+        shouldOpen: () => (
+          state.trayOpen
+          && !state.modalOpen
+          && !state.dragInProgress
+          && !state.assignmentInFlight
+          && trayTransactions().some(transaction => transaction.id === transactionId)
+        ),
+        returnFocus: () => {
+          if (!state.trayOpen) return null;
+          const currentBubble = $$('.tx-bubble', container).find(item => item.dataset.transactionId === transactionId);
+          return $('.tx-bubble-content', currentBubble || container) || $('#tray-close');
+        },
+      });
     }
   });
 
@@ -1848,22 +2344,32 @@ function bindAllocationRows(root, transaction) {
   allocationTotals(root, transaction);
 }
 
-async function openTransactionEditor(transactionId) {
+async function openTransactionEditor(transactionId, {
+  keepTrayOpen = false,
+  returnFocus = null,
+  shouldOpen = null,
+} = {}) {
+  const loadSequence = ++state.transactionEditorLoadSequence;
   let transaction;
   try {
     transaction = (await api(`/api/transactions/${transactionId}`)).transaction;
-  } catch (error) { toast(error.message, 'error'); return; }
-  closeTray();
+  } catch (error) {
+    if (loadSequence === state.transactionEditorLoadSequence && (!shouldOpen || shouldOpen())) toast(error.message, 'error');
+    return;
+  }
+  if (loadSequence !== state.transactionEditorLoadSequence || (shouldOpen && !shouldOpen())) return;
+  if (!keepTrayOpen) closeTray();
   const inflow = toUnits(transaction.amount) > 0n;
   const deleted = !!transaction.deleted_at;
   openModal({
     title: deleted ? 'Transaction in Trash' : 'Transaction details',
     className: 'modal--wide',
+    returnFocus,
     body: `<div class="transaction-hero">
       <div><h3>${escapeHtml(transactionLabel(transaction))}</h3><p>${escapeHtml(transaction.account_name)} · ${escapeHtml(formatDate(transaction.effective_date))}${transaction.pending ? ' · Pending' : ''}</p></div>
       <div class="hero-amount ${inflow ? 'positive' : ''}">${money(transaction.amount, { plus: true })}</div>
     </div>
-    ${deleted ? `<div class="delete-warning">Deleted ${escapeHtml(relativeTime(transaction.deleted_at))}. It is excluded from budgets and will not be recreated by synchronization.</div>` : `<form id="transaction-form" class="form-grid">
+    ${deleted ? `<div class="delete-warning">Deleted ${escapeHtml(relativeTime(transaction.deleted_at))}. It is excluded from budgets and will not be recreated by synchronization.</div>` : `<form id="transaction-form" class="form-grid" data-transaction-id="${escapeHtml(transaction.id)}">
       <label>Payee<input id="transaction-payee" value="${escapeHtml(transaction.payee)}" required maxlength="500"></label>
       <label>Budget date<input id="transaction-date" type="date" value="${escapeHtml(transaction.effective_date)}" required></label>
       <label class="full">Note<textarea id="transaction-note" maxlength="10000">${escapeHtml(transaction.note || '')}</textarea></label>
@@ -2000,6 +2506,11 @@ const RULE_FIELDS = {
   day_of_month: 'Day of month', month: 'Month number', pending: 'Pending', cleared: 'Cleared',
   source: 'Source', unassigned: 'Unassigned', note: 'Note', tags: 'Tags', currency: 'Currency', needs_review: 'Needs review',
 };
+const RULE_PHASES = [
+  { value: 'cleanup', label: '1. Clean up', description: 'Normalize names and details first.' },
+  { value: 'categorize', label: '2. Categorize', description: 'Assign categories and splits.' },
+  { value: 'finish', label: '3. Finish and flag', description: 'Add notes, tags, and review flags.' },
+];
 const RULE_OPERATORS = {
   is: 'is', is_not: 'is not', contains: 'contains', not_contains: 'does not contain', starts_with: 'starts with',
   ends_with: 'ends with', regex: 'matches pattern', one_of: 'is one of', not_one_of: 'is not one of', between: 'is between',
@@ -2050,19 +2561,30 @@ function ruleActionSummary(action) {
   return action.type;
 }
 
-function ruleCard(rule) {
-  return `<article class="rule-card" data-rule-id="${rule.id}">
-    <div class="rule-card-header"><div><h3>${escapeHtml(rule.name)}</h3><div class="rule-meta"><span class="pill">${escapeHtml(rule.phase)}</span><span class="pill">Priority ${rule.priority}</span>${rule.enabled ? '<span class="pill positive">On</span>' : '<span class="pill">Off</span>'}</div></div><button class="icon-button edit-rule" type="button" aria-label="Edit ${escapeHtml(rule.name)}"><span data-icon="pencil"></span></button></div>
+function ruleCard(rule, position) {
+  return `<article class="rule-card" data-rule-id="${rule.id}" data-rule-phase="${escapeHtml(rule.phase)}" data-priority="${rule.priority}" data-version="${rule.version}">
+    <div class="rule-card-header"><div><h3>${escapeHtml(rule.name)}</h3><div class="rule-meta"><span class="pill">Order ${position + 1}</span>${rule.enabled ? '<span class="pill positive">On</span>' : '<span class="pill">Off</span>'}</div></div><div class="rule-card-actions"><button class="reorder-handle rule-reorder-handle" type="button" aria-label="Reorder ${escapeHtml(rule.name)} within ${escapeHtml(rule.phase)}" aria-describedby="rule-reorder-help" title="Drag to reorder within this phase"><span aria-hidden="true">⠿</span></button><button class="icon-button edit-rule" type="button" aria-label="Edit ${escapeHtml(rule.name)}"><span data-icon="pencil"></span></button></div></div>
     <div class="rule-sentence"><b>When:</b> ${escapeHtml(ruleConditionSummary(rule.conditions))}</div>
     <div class="rule-sentence"><b>Then:</b> ${escapeHtml(rule.actions.map(ruleActionSummary).join(', '))}</div>
   </article>`;
 }
 
+function rulePhaseLane(phase) {
+  const rules = state.rules.filter(rule => rule.phase === phase.value);
+  return `<section class="rule-phase" data-rule-phase="${phase.value}">
+    <header class="rule-phase-header"><div><h2>${escapeHtml(phase.label)}</h2><p>${escapeHtml(phase.description)}</p></div><span class="pill">${rules.length} rule${rules.length === 1 ? '' : 's'}</span></header>
+    <div class="rule-list" data-rule-phase="${phase.value}">${rules.map(ruleCard).join('') || '<div class="rule-lane-empty">No rules in this phase.</div>'}</div>
+  </section>`;
+}
+
 async function renderRules() {
   const result = await api('/api/rules');
   state.rules = result.rules;
+  const reorderFocus = currentReorderFocus();
   $('#app-view').innerHTML = `<header class="view-header"><div><h1>Rules</h1><p>Automatic cleanup for new imports; manual runs only process unsorted transactions in the selected month.</p></div><div class="view-actions"><button class="button button--soft run-rules" type="button">Run rules</button><button class="button button--primary add-rule" type="button">+ New rule</button></div></header>
-    <div class="rule-list">${state.rules.map(ruleCard).join('') || '<div class="empty-state"><strong>No rules yet</strong>Create a rule from a transaction or build one here. Rules run automatically during every import.</div>'}</div>`;
+    <p id="rule-reorder-help" class="sr-only">Drag this handle to change the order within its phase. With a keyboard, use the Up and Down arrow keys or the rule editor's Order within phase field.</p>
+    <div id="reorder-status" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+    ${state.rules.length ? `<div class="rule-phase-list">${RULE_PHASES.map(rulePhaseLane).join('')}</div>` : '<div class="empty-state"><strong>No rules yet</strong>Create a rule from a transaction or build one here. Rules run automatically during every import.</div>'}`;
   hydrateIcons($('#app-view'));
   $('.run-rules', $('#app-view')).addEventListener('click', async event => {
     const button = event.currentTarget;
@@ -2084,6 +2606,7 @@ async function renderRules() {
   });
   $('.add-rule', $('#app-view')).addEventListener('click', () => openRuleEditor());
   $$('.edit-rule', $('#app-view')).forEach(button => button.addEventListener('click', () => openRuleEditor(state.rules.find(rule => rule.id === button.closest('.rule-card').dataset.ruleId))));
+  restoreReorderFocus(reorderFocus);
 }
 
 function simpleConditionsFromRule(rule, transaction) {
@@ -2791,6 +3314,10 @@ function openMonthPicker() {
 
 function handleLayeredBack({ returnToBudget = false } = {}) {
   try {
+    if (state.cancelReorderDrag) {
+      state.cancelReorderDrag();
+      return 'handled';
+    }
     if (state.cancelBubbleDrag) {
       state.cancelBubbleDrag();
       return 'handled';
@@ -2871,6 +3398,7 @@ async function enterApplication() {
 
 async function initialize() {
   hydrateIcons();
+  installReorderDrag();
   $$('.nav-item').forEach(button => button.addEventListener('click', () => setView(button.dataset.view)));
   $('#brand-button').addEventListener('click', () => setView('budget'));
   $('#avatar-button').addEventListener('click', () => setView('more'));

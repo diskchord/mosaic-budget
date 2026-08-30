@@ -124,6 +124,66 @@ def test_create_move_reorder_and_archive_budget_structure() -> None:
         )
 
 
+def test_existing_sections_and_categories_reorder_with_conflict_protection() -> None:
+    client, headers = _signed_in_client()
+    with client:
+        budget = client.get("/api/budget", params={"month": "2026-08"}).json()
+        expenses = [section for section in budget["sections"] if not section["is_income"]]
+        moving_section = expenses[-1]
+
+        section_response = client.patch(
+            f"/api/sections/{moving_section['id']}",
+            headers=headers,
+            json={"version": moving_section["version"], "sort_order": 0},
+        )
+        assert section_response.status_code == 200
+        reordered_section = section_response.json()["section"]
+        latest = client.get("/api/budget", params={"month": "2026-08"}).json()
+        assert latest["sections"][0]["is_income"] is True
+        assert latest["sections"][1]["id"] == moving_section["id"]
+        assert [section["sort_order"] for section in latest["sections"] if not section["is_income"]] == list(
+            range(1, len(expenses) + 1)
+        )
+
+        stale_section = client.patch(
+            f"/api/sections/{moving_section['id']}",
+            headers=headers,
+            json={"version": moving_section["version"], "sort_order": len(expenses) - 1},
+        )
+        assert stale_section.status_code == 409
+        assert stale_section.json()["detail"]["current"]["version"] == reordered_section["version"]
+
+        food = next(section for section in latest["sections"] if section["name"] == "Food")
+        moving_category = food["categories"][-1]
+        category_response = client.patch(
+            f"/api/categories/{moving_category['id']}",
+            params={"current_month": "2026-08"},
+            headers=headers,
+            json={
+                "version": moving_category["version"],
+                "section_id": food["id"],
+                "sort_order": 0,
+            },
+        )
+        assert category_response.status_code == 200
+        reordered_category = category_response.json()["category"]
+        latest = client.get("/api/budget", params={"month": "2026-08"}).json()
+        latest_food = next(section for section in latest["sections"] if section["id"] == food["id"])
+        assert latest_food["categories"][0]["id"] == moving_category["id"]
+        assert [category["sort_order"] for category in latest_food["categories"]] == list(
+            range(len(latest_food["categories"]))
+        )
+
+        stale_category = client.patch(
+            f"/api/categories/{moving_category['id']}",
+            params={"current_month": "2026-08"},
+            headers=headers,
+            json={"version": moving_category["version"], "sort_order": 1},
+        )
+        assert stale_category.status_code == 409
+        assert stale_category.json()["detail"]["current"]["version"] == reordered_category["version"]
+
+
 def test_changed_category_default_seeds_only_requested_zero_month_and_audits() -> None:
     client, headers = _signed_in_client()
     with client:

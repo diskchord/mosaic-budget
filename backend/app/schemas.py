@@ -231,6 +231,24 @@ class RuleUpdateRequest(RuleRequest):
     version: int = Field(ge=1)
 
 
+class RuleOrderItem(BaseModel):
+    id: UUID
+    version: int = Field(ge=1)
+
+
+class RuleOrderRequest(BaseModel):
+    phase: Literal["cleanup", "categorize", "finish"]
+    rules: list[RuleOrderItem] = Field(min_length=1)
+
+    @field_validator("rules")
+    @classmethod
+    def rules_must_be_unique(cls, rules: list[RuleOrderItem]) -> list[RuleOrderItem]:
+        rule_ids = [rule.id for rule in rules]
+        if len(rule_ids) != len(set(rule_ids)):
+            raise ValueError("Include each rule only once")
+        return rules
+
+
 class RuleRunRequest(BaseModel):
     month: str = Field(pattern=r"^\d{4}-\d{2}$")
 

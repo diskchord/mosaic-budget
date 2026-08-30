@@ -169,6 +169,8 @@ Each editable object has an integer version. A mutation includes the version rea
 
 The browser presents a conflict choice rather than silently overwriting another device. Server-sent events announce workspace audit activity so open clients can refresh.
 
+Rule reordering submits the complete, versioned lane for one execution phase. Rule creates, archives, phase changes, and lane reorders first lock the stable workspace row, preventing a concurrent insert from bypassing the lane's exact membership check. Changed priorities receive matching rule revisions, and the reorder emits one aggregate audit event.
+
 ## Incident and notification pipeline
 
 `notification_incidents` deduplicates active operational problems by a stable incident key. `notification_outbox` is a durable delivery queue. Detecting an incident and queuing its message occur in the same database transaction.

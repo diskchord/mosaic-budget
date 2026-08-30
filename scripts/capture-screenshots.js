@@ -419,6 +419,46 @@ class MosaicCapture {
     );
   }
 
+  async verifyReorderAffordances(view) {
+    const result = await this.evaluate(`(() => {
+      const handlesAreUsable = handles => handles.length > 0 && handles.every(handle => {
+        const rect = handle.getBoundingClientRect();
+        return rect.width >= 44 && rect.height >= 44;
+      });
+      if (${JSON.stringify(view)} === 'budget') {
+        const expenseSections = [...document.querySelectorAll('.section-card:not(.income)')];
+        const categories = [...document.querySelectorAll('.category-row')];
+        const sectionHandles = [...document.querySelectorAll('.section-reorder-handle')];
+        const categoryHandles = [...document.querySelectorAll('.category-reorder-handle')];
+        return {
+          ok: expenseSections.length === sectionHandles.length
+            && categories.length === categoryHandles.length
+            && !document.querySelector('.section-card.income .section-reorder-handle')
+            && handlesAreUsable(sectionHandles)
+            && handlesAreUsable(categoryHandles)
+            && document.documentElement.scrollWidth <= window.innerWidth,
+          expenseSections: expenseSections.length,
+          sectionHandles: sectionHandles.length,
+          categories: categories.length,
+          categoryHandles: categoryHandles.length,
+        };
+      }
+      const phases = [...document.querySelectorAll('.rule-phase')].map(phase => phase.dataset.rulePhase);
+      const cards = [...document.querySelectorAll('.rule-card')];
+      const handles = [...document.querySelectorAll('.rule-reorder-handle')];
+      return {
+        ok: phases.join(',') === 'cleanup,categorize,finish'
+          && cards.length === handles.length
+          && handlesAreUsable(handles)
+          && document.documentElement.scrollWidth <= window.innerWidth,
+        phases,
+        cards: cards.length,
+        handles: handles.length,
+      };
+    })()`);
+    if (!result?.ok) throw new Error(`${view} reorder affordances are incomplete: ${JSON.stringify(result)}`);
+  }
+
   async setTheme(theme) {
     await this.goTo('more');
     const selector = `.theme-choice[data-theme-choice=${JSON.stringify(theme)}]`;
@@ -623,6 +663,7 @@ class MosaicCapture {
     await this.setTheme('citrus');
     await this.goTo('budget');
     await this.scrollTop();
+    await this.verifyReorderAffordances('budget');
     await this.capture(SCREENSHOTS.budgetDesktop);
 
     await this.setTheme('meadow');
@@ -631,6 +672,31 @@ class MosaicCapture {
     await this.openTray(3);
     await this.capture(SCREENSHOTS.trayDesktop);
     await this.dragSelectedToCategory('Groceries', SCREENSHOTS.dragDesktop);
+    const desktopInspection = await this.evaluate(`(() => ({
+      transactionId: document.querySelector('#transaction-tray.open .tx-bubble:first-child')?.dataset.transactionId,
+      selectedIds: [...document.querySelectorAll('#transaction-tray.open .tx-bubble.is-selected')]
+        .map(bubble => bubble.dataset.transactionId).sort(),
+    }))()`);
+    if (desktopInspection.selectedIds.length !== 3 || !desktopInspection.selectedIds.includes(desktopInspection.transactionId)) {
+      throw new Error('Desktop tray inspection requires the first transaction to remain in the three-item selection');
+    }
+    await this.click('#transaction-tray.open .tx-bubble:first-child .tx-bubble-content');
+    await this.waitUntil(
+      `document.querySelector('#transaction-form')?.dataset.transactionId === ${JSON.stringify(desktopInspection.transactionId)}
+        && document.querySelector('#transaction-tray.open')?.getAttribute('aria-hidden') === 'false'
+        && document.querySelector('#transaction-tray.open')?.hasAttribute('inert')`,
+      'the selected transaction details to open above the inactive sorting tray',
+    );
+    await this.click('.modal-cancel');
+    await this.waitUntil(
+      `!document.querySelector('#modal-root .modal')
+        && document.querySelector('#transaction-tray.open')?.getAttribute('aria-hidden') === 'false'
+        && JSON.stringify([...document.querySelectorAll('#transaction-tray.open .tx-bubble.is-selected')]
+          .map(bubble => bubble.dataset.transactionId).sort()) === ${JSON.stringify(JSON.stringify(desktopInspection.selectedIds))}
+        && document.activeElement?.matches('.tx-bubble-content')
+        && document.activeElement?.closest('.tx-bubble')?.dataset.transactionId === ${JSON.stringify(desktopInspection.transactionId)}`,
+      'transaction inspection to return focus to the sorting tray',
+    );
     await this.click('#tray-close');
     await this.waitUntil(`!document.querySelector('#transaction-tray.open')`, 'the tray to close');
 
@@ -659,6 +725,7 @@ class MosaicCapture {
     await this.goTo('rules');
     await this.scrollTop();
     await this.waitFor('.rule-list .rule-card', 'at least one automation rule');
+    await this.verifyReorderAffordances('rules');
     await this.capture(SCREENSHOTS.rulesDesktop);
     await this.click('.rule-list .rule-card:first-child .edit-rule');
     await this.waitFor('#rule-form', 'the rule builder');
@@ -684,10 +751,36 @@ class MosaicCapture {
     await this.setTheme('meadow');
     await this.goTo('budget');
     await this.scrollTop();
+    await this.verifyReorderAffordances('budget');
     await this.capture(SCREENSHOTS.budgetMobile);
 
     await this.openTray(2);
     await this.capture(SCREENSHOTS.trayMobile);
+    const mobileInspection = await this.evaluate(`(() => ({
+      transactionId: document.querySelector('#transaction-tray.open .tx-bubble:first-child')?.dataset.transactionId,
+      selectedIds: [...document.querySelectorAll('#transaction-tray.open .tx-bubble.is-selected')]
+        .map(bubble => bubble.dataset.transactionId).sort(),
+    }))()`);
+    if (mobileInspection.selectedIds.length !== 2 || !mobileInspection.selectedIds.includes(mobileInspection.transactionId)) {
+      throw new Error('Mobile tray inspection requires the first transaction to remain in the two-item selection');
+    }
+    await this.click('#transaction-tray.open .tx-bubble:first-child .tx-bubble-content');
+    await this.waitUntil(
+      `document.querySelector('#transaction-form')?.dataset.transactionId === ${JSON.stringify(mobileInspection.transactionId)}
+        && document.querySelector('#transaction-tray.open')?.getAttribute('aria-hidden') === 'false'
+        && document.querySelector('#transaction-tray.open')?.hasAttribute('inert')`,
+      'the selected mobile transaction details to open above the inactive sorting tray',
+    );
+    await this.click('.modal-cancel');
+    await this.waitUntil(
+      `!document.querySelector('#modal-root .modal')
+        && document.querySelector('#transaction-tray.open')?.getAttribute('aria-hidden') === 'false'
+        && JSON.stringify([...document.querySelectorAll('#transaction-tray.open .tx-bubble.is-selected')]
+          .map(bubble => bubble.dataset.transactionId).sort()) === ${JSON.stringify(JSON.stringify(mobileInspection.selectedIds))}
+        && document.activeElement?.matches('.tx-bubble-content')
+        && document.activeElement?.closest('.tx-bubble')?.dataset.transactionId === ${JSON.stringify(mobileInspection.transactionId)}`,
+      'mobile transaction inspection to return focus to the sorting tray',
+    );
     await this.click('#tray-close');
     await this.waitUntil(`!document.querySelector('#transaction-tray.open')`, 'the mobile tray to close');
 

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from uuid import UUID
+
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.bootstrap import bootstrap
 from app.db import Base, SessionLocal, engine
 from app.main import app
-from app.models import AuditEvent
+from app.models import AuditEvent, Rule, RuleRevision
+from app.services.rules import enabled_rules_for_workspace
 
 
 def _signed_in_client() -> tuple[TestClient, dict[str, str]]:
@@ -62,6 +65,173 @@ def _listed_transaction_ids(client: TestClient, status: str) -> set[str]:
     response = client.get("/api/transactions", params={"status": status})
     assert response.status_code == 200
     return {transaction["id"] for transaction in response.json()["transactions"]}
+
+
+def _rule_payload(name: str, phase: str, priority: int, *, enabled: bool = True) -> dict:
+    return {
+        "name": name,
+        "enabled": enabled,
+        "phase": phase,
+        "priority": priority,
+        "conditions": {"field": "payee", "operator": "contains", "value": name},
+        "actions": [{"type": "set_payee", "value": f"{name} matched"}],
+        "apply_to_manual_overrides": False,
+        "stop_processing": True,
+        "apply_now": "none",
+    }
+
+
+def test_rule_phase_lanes_reorder_atomically_with_versions_and_revisions() -> None:
+    client, headers = _signed_in_client()
+    with client:
+        for name, phase, priority, enabled in (
+            ("Cleanup lane", "cleanup", 50, True),
+            ("Categorize first", "categorize", 100, True),
+            ("Categorize second", "categorize", 200, False),
+            ("Categorize third", "categorize", 300, True),
+            ("Finish lane", "finish", 10, True),
+        ):
+            response = client.post(
+                "/api/rules",
+                headers=headers,
+                json=_rule_payload(name, phase, priority, enabled=enabled),
+            )
+            assert response.status_code == 200
+
+        listed = client.get("/api/rules").json()["rules"]
+        assert [rule["phase"] for rule in listed] == [
+            "cleanup",
+            "categorize",
+            "categorize",
+            "categorize",
+            "finish",
+        ]
+        lane = [rule for rule in listed if rule["phase"] == "categorize"]
+        original = {rule["id"]: rule for rule in lane}
+        desired = [lane[1], lane[2], lane[0]]
+        order_payload = {
+            "phase": "categorize",
+            "rules": [{"id": rule["id"], "version": rule["version"]} for rule in desired],
+        }
+
+        forbidden = client.put("/api/rules/order", json=order_payload)
+        assert forbidden.status_code == 403
+
+        response = client.put("/api/rules/order", headers=headers, json=order_payload)
+        assert response.status_code == 200
+        reordered = response.json()["rules"]
+        assert [rule["name"] for rule in reordered] == [
+            "Categorize second",
+            "Categorize third",
+            "Categorize first",
+        ]
+        assert [rule["priority"] for rule in reordered] == [100, 200, 300]
+        assert all(rule["version"] == original[rule["id"]]["version"] + 1 for rule in reordered)
+
+        persisted = [rule for rule in client.get("/api/rules").json()["rules"] if rule["phase"] == "categorize"]
+        assert [rule["id"] for rule in persisted] == [rule["id"] for rule in reordered]
+
+        with SessionLocal() as db:
+            workspace_id = db.scalar(select(Rule.workspace_id).where(Rule.id == UUID(reordered[0]["id"])))
+            assert workspace_id is not None
+            enabled = enabled_rules_for_workspace(db, workspace_id)
+            assert [rule.name for rule in enabled] == [
+                "Cleanup lane",
+                "Categorize third",
+                "Categorize first",
+                "Finish lane",
+            ]
+            for snapshot in reordered:
+                revision = db.scalar(
+                    select(RuleRevision).where(
+                        RuleRevision.rule_id == UUID(snapshot["id"]),
+                        RuleRevision.version == snapshot["version"],
+                    )
+                )
+                assert revision is not None
+                assert revision.snapshot["priority"] == snapshot["priority"]
+            audits = db.scalars(select(AuditEvent).where(AuditEvent.action == "rules.reordered")).all()
+            assert len(audits) == 1
+            assert audits[0].object_type == "rule_set"
+            assert audits[0].detail == {
+                "phase": "categorize",
+                "rule_ids": [rule["id"] for rule in reordered],
+            }
+
+        stale = client.put("/api/rules/order", headers=headers, json=order_payload)
+        assert stale.status_code == 409
+        assert [rule["id"] for rule in stale.json()["detail"]["current"]] == [rule["id"] for rule in reordered]
+
+        missing = client.put(
+            "/api/rules/order",
+            headers=headers,
+            json={
+                "phase": "categorize",
+                "rules": [{"id": rule["id"], "version": rule["version"]} for rule in reordered[:-1]],
+            },
+        )
+        assert missing.status_code == 409
+
+        duplicate = client.put(
+            "/api/rules/order",
+            headers=headers,
+            json={
+                "phase": "categorize",
+                "rules": [
+                    {"id": reordered[0]["id"], "version": reordered[0]["version"]},
+                    {"id": reordered[0]["id"], "version": reordered[0]["version"]},
+                ],
+            },
+        )
+        assert duplicate.status_code == 422
+
+        no_op = client.put(
+            "/api/rules/order",
+            headers=headers,
+            json={
+                "phase": "categorize",
+                "rules": [{"id": rule["id"], "version": rule["version"]} for rule in reordered],
+            },
+        )
+        assert no_op.status_code == 200
+        assert no_op.json()["rules"] == reordered
+        with SessionLocal() as db:
+            assert len(db.scalars(select(AuditEvent).where(AuditEvent.action == "rules.reordered")).all()) == 1
+
+
+def test_rule_reorder_normalizes_duplicate_priorities_deterministically() -> None:
+    client, headers = _signed_in_client()
+    with client:
+        for name in ("Equal alpha", "Equal beta", "Equal gamma"):
+            response = client.post(
+                "/api/rules",
+                headers=headers,
+                json=_rule_payload(name, "finish", 100),
+            )
+            assert response.status_code == 200
+
+        lane = [rule for rule in client.get("/api/rules").json()["rules"] if rule["phase"] == "finish"]
+        desired = [lane[2], lane[0], lane[1]]
+        response = client.put(
+            "/api/rules/order",
+            headers=headers,
+            json={
+                "phase": "finish",
+                "rules": [{"id": rule["id"], "version": rule["version"]} for rule in desired],
+            },
+        )
+        assert response.status_code == 200
+        reordered = response.json()["rules"]
+        assert [rule["id"] for rule in reordered] == [rule["id"] for rule in desired]
+        assert [rule["priority"] for rule in reordered] == [0, 1, 2]
+        assert all(rule["version"] == 2 for rule in reordered)
+
+        with SessionLocal() as db:
+            workspace_id = db.scalar(select(Rule.workspace_id).where(Rule.id == UUID(reordered[0]["id"])))
+            assert workspace_id is not None
+            assert [str(rule.id) for rule in enabled_rules_for_workspace(db, workspace_id)] == [
+                rule["id"] for rule in reordered
+            ]
 
 
 def test_run_rules_scopes_to_unsorted_active_transactions_in_selected_month() -> None:
