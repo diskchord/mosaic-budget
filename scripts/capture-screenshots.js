@@ -498,7 +498,8 @@ class MosaicCapture {
     await this.settle();
     const result = await this.evaluate(`(() => {
       const button = document.querySelector('#inbox-button:not(.hidden)');
-      const finalAction = document.querySelector('#app-view .add-section-card');
+      const finalAction = document.querySelector('#app-view .structure-notice')
+        || document.querySelector('#app-view .add-section-card');
       if (!button || !finalAction) return { ok: false, reason: 'missing element' };
       const buttonRect = button.getBoundingClientRect();
       const actionRect = finalAction.getBoundingClientRect();
@@ -540,6 +541,70 @@ class MosaicCapture {
       };
     })()`);
     if (!result?.ok) throw new Error(`The default single-category editor is incomplete: ${JSON.stringify(result)}`);
+  }
+
+  async verifyHiddenNoticePlacement() {
+    const target = await this.evaluate(`(() => {
+      const section = state.budget?.sections?.find(item => !item.is_income && item.categories?.length);
+      const category = section?.categories?.[0];
+      return category ? { id: category.id, version: category.version } : null;
+    })()`);
+    if (!target) throw new Error('A category is required to verify the hidden-items notice');
+    const hidden = await this.evaluate(`api('/api/categories/${target.id}/visibility', {
+      method: 'PUT',
+      body: {
+        version: ${Number(target.version)},
+        month: state.month + '-01',
+        visible: false,
+        scope: 'month',
+      },
+    })`);
+    const rendered = await this.evaluate(`loadBudget({ silent: true }).then(ok => {
+      if (ok) renderBudget();
+      return ok;
+    })`);
+    if (!rendered) throw new Error('Could not reload the budget after hiding a category');
+    const placement = await this.evaluate(`(() => {
+      const view = document.querySelector('#app-view');
+      const notices = [...view.querySelectorAll(':scope > .structure-notice')];
+      const notice = notices[0];
+      const children = [...view.children];
+      const sectionIndexes = children
+        .map((child, index) => child.matches('.section-card') ? index : -1)
+        .filter(index => index >= 0);
+      const actionsIndex = children.findIndex(child => child.matches('.structure-actions'));
+      return {
+        ok: notices.length === 1
+          && notice === view.lastElementChild
+          && children.indexOf(notice) > actionsIndex
+          && sectionIndexes.every(index => index < children.indexOf(notice)),
+        notices: notices.length,
+        noticeIndex: children.indexOf(notice),
+        actionsIndex,
+        sectionIndexes,
+      };
+    })()`);
+    if (!placement?.ok) throw new Error(`The hidden-items notice is not last in the budget: ${JSON.stringify(placement)}`);
+    await this.verifyInboxClearance();
+    await this.click('#app-view .structure-notice');
+    await this.waitFor('#modal-root .hidden-structure-item .delete-hidden-structure', 'the hidden-item delete action');
+    await this.click('#modal-root .modal-cancel');
+    await this.waitUntil(`!document.querySelector('#modal-root .modal')`, 'the hidden-item manager to close');
+    await this.evaluate(`api('/api/categories/${target.id}/visibility', {
+      method: 'PUT',
+      body: {
+        version: ${Number(hidden.category.version)},
+        month: state.month + '-01',
+        visible: true,
+        scope: 'month',
+      },
+    })`);
+    const restored = await this.evaluate(`loadBudget({ silent: true }).then(ok => {
+      if (ok) renderBudget();
+      return ok;
+    })`);
+    if (!restored) throw new Error('Could not reload the budget after restoring a category');
+    await this.scrollTop();
   }
 
   async exerciseSplitEditor() {
@@ -834,6 +899,7 @@ class MosaicCapture {
     await this.verifyReorderAffordances('budget');
     await this.verifyInboxButton(56);
     await this.verifyInboxClearance();
+    await this.verifyHiddenNoticePlacement();
     await this.capture(SCREENSHOTS.budgetDesktop);
 
     await this.setTheme('meadow');
@@ -926,6 +992,7 @@ class MosaicCapture {
     await this.verifyReorderAffordances('budget');
     await this.verifyInboxButton(58);
     await this.verifyInboxClearance();
+    await this.verifyHiddenNoticePlacement();
     await this.capture(SCREENSHOTS.budgetMobile);
     await this.setViewport({ width: 320, height: 844, mobile: true });
     await this.waitUntil(`window.innerWidth === 320`, 'the narrow mobile viewport');

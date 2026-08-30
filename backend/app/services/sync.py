@@ -23,6 +23,7 @@ from ..models import (
     SourceTransaction,
     SourceTransactionVersion,
     SyncRun,
+    Workspace,
 )
 from ..security import decrypt_secret
 from ..utils import ensure_utc, normalize_description, parse_decimal, sanitize_message, stable_hash, utcnow
@@ -673,6 +674,11 @@ def perform_sync(connection_id: uuid.UUID) -> dict[str, int | str]:
 
         run = db.get(SyncRun, run_id)
         connection = db.get(SimpleFinConnection, connection_id)
+        db.scalar(
+            select(Workspace.id)
+            .where(Workspace.id == connection.workspace_id)
+            .with_for_update()
+        )
         batch = ImportBatch(
             simplefin_connection_id=connection.id,
             sync_run_id=run.id,

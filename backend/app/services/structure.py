@@ -34,8 +34,15 @@ def lifetime_active(item: Section | Category, month: date) -> bool:
     return item.ends_before_month is None or month < item.ends_before_month
 
 
+def deleted_in_month(item: Section | Category, month: date) -> bool:
+    month = month_floor(month)
+    return item.deleted_from_month is not None and month >= item.deleted_from_month
+
+
 def visibility_reason(item: Section | Category, month: date, *, excluded: bool = False) -> str | None:
     month = month_floor(month)
+    if deleted_in_month(item, month):
+        return "deleted"
     if item.archived_at is not None:
         return "archived"
     if month < item.starts_month:
@@ -51,6 +58,7 @@ def availability_dict(item: Section | Category) -> dict[str, Any]:
     return {
         "starts_month": item.starts_month.isoformat()[:7],
         "ends_before_month": item.ends_before_month.isoformat()[:7] if item.ends_before_month else None,
+        "deleted_from_month": item.deleted_from_month.isoformat()[:7] if item.deleted_from_month else None,
     }
 
 

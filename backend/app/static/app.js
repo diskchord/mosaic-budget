@@ -450,7 +450,11 @@ function categoryOptions(selected = '', includeUnavailable = false) {
   let markup = '';
   if (includeUnavailable) {
     const groups = new Map();
-    categoryCatalog().filter(category => !category.archived).forEach(category => {
+    categoryCatalog().filter(category => (
+      !category.archived
+      && !category.deleted_from_month
+      && !category.section_deleted_from_month
+    )).forEach(category => {
       if (!groups.has(category.section_id)) groups.set(category.section_id, { name: category.section_name, categories: [] });
       groups.get(category.section_id).categories.push(category);
     });
@@ -462,15 +466,20 @@ function categoryOptions(selected = '', includeUnavailable = false) {
       return `<optgroup label="${escapeHtml(group.name)}">${options}</optgroup>`;
     }).join('');
   } else {
-    markup = (state.budget?.sections || []).map(section => {
-      const options = section.categories.map(category => `<option value="${category.id}" ${category.id === selected ? 'selected' : ''}>${escapeHtml(category.name)}</option>`).join('');
+    markup = (state.budget?.sections || []).filter(section => !section.deleted_from_month).map(section => {
+      const options = section.categories.filter(category => !category.deleted_from_month).map(category => `<option value="${category.id}" ${category.id === selected ? 'selected' : ''}>${escapeHtml(category.name)}</option>`).join('');
       return options ? `<optgroup label="${escapeHtml(section.name)}">${options}</optgroup>` : '';
     }).join('');
   }
   const selectedItem = selected ? categoryCatalog().find(category => category.id === selected) : null;
   const selectedIsVisible = selectedItem?.visible_this_month && !selectedItem?.archived;
-  if (selectedItem && !includeUnavailable && !selectedIsVisible) {
+  const selectedWasDeleted = selectedItem?.deleted_from_month || selectedItem?.section_deleted_from_month;
+  if (selectedItem && includeUnavailable && selectedWasDeleted) {
+    markup += `<optgroup label="Unavailable"><option value="${selectedItem.id}" selected>${escapeHtml(selectedItem.name)} — deleted</option></optgroup>`;
+  } else if (selectedItem && !includeUnavailable && !selectedIsVisible) {
     markup += `<optgroup label="Current historical assignment"><option value="${selectedItem.id}" selected>${escapeHtml(selectedItem.name)} — not available this month</option></optgroup>`;
+  } else if (selected && !selectedItem) {
+    markup += `<optgroup label="Unavailable"><option value="${escapeHtml(selected)}" selected>Deleted category</option></optgroup>`;
   }
   return markup;
 }
@@ -554,9 +563,9 @@ function renderBudget() {
         <div class="summary-metric"><b>${money(summary.actual_cash_flow)}</b><span>Cash flow</span></div>
       </div>
     </section>
-    ${hiddenCount ? `<button class="structure-notice manage-hidden-structure" type="button"><span><strong>${hiddenCount} hidden item${hiddenCount === 1 ? '' : 's'} in ${escapeHtml(monthLabel(state.month))}</strong><small>${hiddenActivity !== 0n ? `${money(unitsToString(hiddenActivity))} of activity remains included in totals.` : 'Show, resume, or restore month-specific categories and sections.'}</small></span><span>Manage →</span></button>` : ''}
     ${sections}
-    <div class="structure-actions"><button class="add-section-card" type="button">+ Add budget section</button>${hiddenCount ? '<button class="button button--soft manage-hidden-structure" type="button">Manage hidden items</button>' : ''}</div>`;
+    <div class="structure-actions"><button class="add-section-card" type="button">+ Add budget section</button></div>
+    ${hiddenCount ? `<button class="structure-notice manage-hidden-structure" type="button"><span><strong>${hiddenCount} hidden item${hiddenCount === 1 ? '' : 's'} in ${escapeHtml(monthLabel(state.month))}</strong><small>${hiddenActivity !== 0n ? `${money(unitsToString(hiddenActivity))} of activity remains included in totals.` : 'Show, resume, or restore month-specific categories and sections.'}</small></span><span>Manage →</span></button>` : ''}`;
 
   hydrateIcons($('#app-view'));
   $$('.budget-edit', $('#app-view')).forEach(button => button.addEventListener('click', event => { event.stopPropagation(); openBudgetAmount(button.dataset.categoryId); }));
@@ -1243,6 +1252,16 @@ function openBudgetAmount(categoryId) {
 function availabilityDescription(item) {
   const start = item?.starts_month || '1900-01';
   const end = item?.ends_before_month || null;
+  const deleted = item?.deleted_from_month || null;
+  if (deleted) {
+    if (start >= deleted) {
+      return `Scheduled for ${monthLabel(start)}. Permanently deleted beginning ${monthLabel(deleted)} before it became available.`;
+    }
+    const first = start === '1900-01'
+      ? 'Available in earlier budget history'
+      : `Available beginning ${monthLabel(start)}`;
+    return `${first} through ${monthLabel(addMonths(deleted, -1))}. Permanently deleted beginning ${monthLabel(deleted)}.`;
+  }
   if (start === '1900-01' && !end) return 'Available in every budget month.';
   const pieces = [];
   if (start === '1900-01') pieces.push('Available from the earliest budget month');
@@ -1325,6 +1344,40 @@ function openStructureRemoval(kind, item) {
   });
 }
 
+async function deleteStructure(kind, item) {
+  const noun = kind === 'section' ? 'section' : 'category';
+  const plural = kind === 'section' ? 'sections' : 'categories';
+  const scope = `beginning ${monthLabel(state.month)}`;
+  const message = kind === 'section'
+    ? `This section and every category in it will be permanently deleted ${scope}. Every transaction using those categories, including split transactions and earlier history, will be uncategorized; active transactions will return to To sort. Rules using them will be turned off.`
+    : `This category will be permanently deleted ${scope}. Every transaction using it, including split transactions and earlier history, will be uncategorized; active transactions will return to To sort. Rules using it will be turned off.`;
+  const accepted = await confirmDialog({
+    title: `Delete ${item.name}?`,
+    message,
+    confirmText: `Delete ${noun}`,
+    danger: true,
+    inputLabel: `Type ${item.name} to confirm`,
+    expected: item.name,
+  });
+  if (!accepted) return;
+  try {
+    const result = await withConflict(
+      current => api(`/api/${plural}/${item.id}`, { method: 'DELETE', body: current }),
+      { version: item.version, month: `${state.month}-01` },
+      noun,
+    );
+    if (!result) return;
+    const transactionCount = Number(result.transactions_decategorized || 0);
+    const ruleCount = Number(result.rules_disabled || 0);
+    const details = [
+      transactionCount ? `${transactionCount} transaction${transactionCount === 1 ? '' : 's'} returned to To sort` : '',
+      ruleCount ? `${ruleCount} rule${ruleCount === 1 ? '' : 's'} turned off` : '',
+    ].filter(Boolean);
+    toast(`${item.name} deleted${details.length ? `. ${details.join('; ')}.` : ''}`);
+    await refreshCurrentView();
+  } catch (error) { toast(error.message, 'error'); }
+}
+
 function hiddenItemMarkup(kind, item) {
   const archived = item.visibility_reason === 'archived';
   const location = kind === 'category' ? `<small>${escapeHtml(item.section_name)} · ${escapeHtml(item.visibility_label)}</small>` : `<small>${escapeHtml(item.visibility_label)} · ${item.category_count} categor${item.category_count === 1 ? 'y' : 'ies'}</small>`;
@@ -1333,7 +1386,7 @@ function hiddenItemMarkup(kind, item) {
     : archived ? '' : '<button class="button button--soft restore-structure" type="button" data-scope="forward">Show from chosen month</button>';
   return `<article class="hidden-structure-item" data-kind="${kind}" data-id="${item.id}" data-version="${item.version}">
     <div><strong>${escapeHtml(item.name)}</strong>${location}<p>${escapeHtml(availabilityDescription(item))}</p></div>
-    <div class="button-row">${firstAction}${item.visibility_reason === 'hidden_this_month' ? '<button class="button button--ghost restore-structure" type="button" data-scope="forward">Show from chosen month</button>' : ''}<button class="button button--ghost restore-structure" type="button" data-scope="all">Show in all months</button></div>
+    <div class="button-row">${firstAction}${item.visibility_reason === 'hidden_this_month' ? '<button class="button button--ghost restore-structure" type="button" data-scope="forward">Show from chosen month</button>' : ''}<button class="button button--ghost restore-structure" type="button" data-scope="all">Show in all months</button><button class="button button--danger delete-hidden-structure" type="button">Delete…</button></div>
   </article>`;
 }
 
@@ -1377,6 +1430,13 @@ function openHiddenStructureManager() {
         } catch (error) { toast(error.message, 'error'); }
         finally { setButtonBusy(button, false); }
       }));
+      $$('.delete-hidden-structure', root).forEach(button => button.addEventListener('click', () => {
+        const card = button.closest('.hidden-structure-item');
+        const kind = card.dataset.kind;
+        const items = kind === 'section' ? hidden.sections : hidden.categories;
+        const item = items.find(candidate => candidate.id === card.dataset.id);
+        if (item) deleteStructure(kind, item);
+      }));
     },
   });
 }
@@ -1398,12 +1458,13 @@ function openSectionEditor(sectionId = null) {
       ${section?.is_income ? '<p class="muted">Income is the protected first section and exists in every month.</p>' : `<label>Position<select id="section-position">${positionOptions}</select></label>`}
       ${section ? `<div class="availability-summary full"><strong>Month availability</strong><span>${escapeHtml(availabilityDescription(section))}</span></div>` : startMonthMarkup('section')}
     </form>
-    ${section && !section.is_income ? '<div class="form-section"><button class="button button--danger remove-section" type="button">Remove from budget months…</button></div>' : ''}`,
+    ${section && !section.is_income ? '<div class="form-section button-row"><button class="button button--soft remove-section" type="button">Change month availability…</button><button class="button button--danger delete-section" type="button">Delete section…</button></div>' : ''}`,
     footer: '<button class="button modal-cancel" type="button">Cancel</button><button class="button button--primary modal-save" type="button">Save</button>',
     onMount(root) {
       $('.modal-cancel', root).addEventListener('click', closeModal);
       if (!section) bindStartMonthControl(root, 'section');
       $('.remove-section', root)?.addEventListener('click', () => openStructureRemoval('section', section));
+      $('.delete-section', root)?.addEventListener('click', () => deleteStructure('section', section));
       const save = async () => {
         const button = $('.modal-save', root); setButtonBusy(button, true);
         const body = {
@@ -1458,7 +1519,7 @@ function openCategoryEditor(categoryId = null, sectionId = null) {
       <label>Note<textarea id="category-note">${escapeHtml(found?.note || '')}</textarea></label>
       ${found ? `<div class="availability-summary full"><strong>Month availability</strong><span>${escapeHtml(availabilityDescription(found))}</span></div>` : startMonthMarkup('category')}
     </form>
-    ${found ? '<div class="form-section"><button class="button button--danger remove-category" type="button">Remove from budget months…</button></div>' : ''}`,
+    ${found ? '<div class="form-section button-row"><button class="button button--soft remove-category" type="button">Change month availability…</button><button class="button button--danger delete-category" type="button">Delete category…</button></div>' : ''}`,
     footer: '<button class="button modal-cancel" type="button">Cancel</button><button class="button button--primary modal-save" type="submit" form="category-form">Save</button>',
     onMount(root) {
       $('.modal-cancel', root).addEventListener('click', closeModal);
@@ -1470,6 +1531,7 @@ function openCategoryEditor(categoryId = null, sectionId = null) {
         $('#category-position', root).innerHTML = positionOptions(event.target.value);
       });
       $('.remove-category', root)?.addEventListener('click', () => openStructureRemoval('category', found));
+      $('.delete-category', root)?.addEventListener('click', () => deleteStructure('category', found));
       const save = async () => {
         const button = $('.modal-save', root); setButtonBusy(button, true);
         const body = {

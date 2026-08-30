@@ -22,7 +22,7 @@ from ..models import (
 )
 from ..utils import money_str, next_month
 from .balance_alerts import account_balance_unavailable_reason
-from .structure import availability_dict, lifetime_active, month_exclusion_ids, visibility_reason
+from .structure import availability_dict, deleted_in_month, lifetime_active, month_exclusion_ids, visibility_reason
 from .transaction_labels import transaction_display_payee
 
 
@@ -197,6 +197,7 @@ def _hidden_reason_label(reason: str) -> str:
         "ended": "Ended before this month",
         "hidden_this_month": "Hidden only this month",
         "archived": "Archived in every month",
+        "deleted": "Permanently deleted",
     }.get(reason, "Not available this month")
 
 
@@ -297,6 +298,8 @@ def get_budget_state(db: Session, workspace_id: uuid.UUID, month: date) -> dict[
             key=lambda category: (category.sort_order, category.name.casefold()),
         )
         if section_reason:
+            if section_reason == "deleted":
+                continue
             if not section.is_income:
                 hidden_sections.append(
                     {
@@ -307,7 +310,11 @@ def get_budget_state(db: Session, workspace_id: uuid.UUID, month: date) -> dict[
                         **availability_dict(section),
                         "visibility_reason": section_reason,
                         "visibility_label": _hidden_reason_label(section_reason),
-                        "category_count": len([category for category in section_categories if category.archived_at is None]),
+                        "category_count": len([
+                            category
+                            for category in section_categories
+                            if category.archived_at is None and not deleted_in_month(category, month)
+                        ]),
                         "archived": section.archived_at is not None,
                     }
                 )
@@ -317,12 +324,17 @@ def get_budget_state(db: Session, workspace_id: uuid.UUID, month: date) -> dict[
                     month,
                     excluded=category.id in excluded_categories,
                 )
+                if own_reason == "deleted":
+                    continue
                 category_catalog.append(
                     {
                         "id": str(category.id),
                         "section_id": str(section.id),
                         "section_name": section.name,
                         "section_is_income": section.is_income,
+                        "section_deleted_from_month": (
+                            section.deleted_from_month.isoformat()[:7] if section.deleted_from_month else None
+                        ),
                         "name": category.name,
                         "version": category.version,
                         **availability_dict(category),
@@ -340,6 +352,8 @@ def get_budget_state(db: Session, workspace_id: uuid.UUID, month: date) -> dict[
                 month,
                 excluded=category.id in excluded_categories,
             )
+            if category_reason == "deleted":
+                continue
             budget = budget_map.get(category.id)
             planned = Decimal(budget.planned if budget else category.default_planned)
             activity = Decimal(current_activity.get(category.id, 0))
@@ -348,6 +362,9 @@ def get_budget_state(db: Session, workspace_id: uuid.UUID, month: date) -> dict[
                 "section_id": str(section.id),
                 "section_name": section.name,
                 "section_is_income": section.is_income,
+                "section_deleted_from_month": (
+                    section.deleted_from_month.isoformat()[:7] if section.deleted_from_month else None
+                ),
                 "name": category.name,
                 "version": category.version,
                 **availability_dict(category),

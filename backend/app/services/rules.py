@@ -187,10 +187,13 @@ def _replace_allocations(
         .where(
             Category.id.in_(category_ids),
             Category.archived_at.is_(None),
+            Category.deleted_from_month.is_(None),
             Section.archived_at.is_(None),
+            Section.deleted_from_month.is_(None),
             Section.workspace_id == transaction.workspace_id,
         )
         .options(selectinload(Category.section))
+        .with_for_update()
     ).all()
     if {category.id for category in categories} != category_ids:
         raise RuleError("Rule refers to a missing or archived category")

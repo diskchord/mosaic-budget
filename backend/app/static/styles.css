@@ -652,7 +652,7 @@ body[data-motion="reduced"] *::after { scroll-behavior:auto !important; animatio
 /* Month-specific budget structure controls. */
 .structure-notice {
   width:100%; display:flex; align-items:center; justify-content:space-between; gap:14px;
-  margin:0 0 14px; padding:14px 16px; border:1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  margin:14px 0 0; padding:14px 16px; border:1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
   border-radius:18px; background:linear-gradient(135deg,var(--accent-soft),var(--surface)); color:var(--text);
   text-align:left; box-shadow:var(--shadow-sm); cursor:pointer;
 }

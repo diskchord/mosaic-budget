@@ -73,8 +73,11 @@ Sections and categories are stable historical identities with effective-month av
 - `ends_before_month` is an optional exclusive boundary.
 - `section_month_exclusions` and `category_month_exclusions` represent deliberate one-month gaps.
 - `archived_at` is the explicit all-month archive state.
+- `deleted_from_month` is a non-restorable boundary that removes an item from that month forward while retaining earlier structure history.
 
 A category is usable only when both its own lifetime and its parent section's lifetime include the transaction month and neither has a matching month exclusion. Income is a protected section whose availability cannot be changed.
+
+Permanent deletion tombstones the selected category, or a section and all of its child categories, then removes current/future plans and exclusions. Any transaction touching one of those categories loses its complete allocation set so a split can never be left with an invalid partial total. Transaction versions advance, affected active transactions return to the global inbox, and enabled rules that reference a deleted category are disabled atomically. Deleted items are omitted from current/future category catalogs and hidden-item lists; earlier structure remains queryable for budget history.
 
 Ending an item and later resuming it converts the intervening finite gap into explicit monthly exclusions. This preserves the earlier lifetime and the later resumption without rewriting past budgets. A full restoration clears the range and exclusion controls but still leaves all transaction and audit history unchanged.
 

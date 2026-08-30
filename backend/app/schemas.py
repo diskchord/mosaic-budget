@@ -77,6 +77,11 @@ class StructureVisibilityRequest(BaseModel):
     scope: Literal["month", "forward", "all"]
 
 
+class StructureDeleteRequest(BaseModel):
+    version: int = Field(ge=1)
+    month: date
+
+
 class BudgetAmountRequest(BaseModel):
     version: int = Field(ge=0)
     planned: str

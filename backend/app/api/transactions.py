@@ -10,7 +10,7 @@ from sqlalchemy import func, not_, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from ..db import get_db
-from ..models import Account, Allocation, BudgetTransaction, Category, Section
+from ..models import Account, Allocation, BudgetTransaction, Category, Section, Workspace
 from ..schemas import (
     AllocationInput,
     AllocationRequest,
@@ -35,6 +35,10 @@ from ..utils import money_str, next_month, parse_decimal, parse_month, utcnow
 from .deps import AuthContext, current_auth, require_write
 
 router = APIRouter(prefix="/api/transactions", tags=["transactions"])
+
+
+def _lock_allocation_writes(db: Session, workspace_id: uuid.UUID) -> None:
+    db.scalar(select(Workspace.id).where(Workspace.id == workspace_id).with_for_update())
 
 
 def _load_options():
@@ -181,6 +185,7 @@ def _validate_categories(
         .join(Section, Section.id == Category.section_id)
         .where(Category.id.in_(category_ids), Section.workspace_id == workspace_id)
         .options(selectinload(Category.section))
+        .with_for_update()
     ).all()
     by_id = {row.id: row for row in rows}
     if set(by_id) != category_ids:
@@ -188,7 +193,9 @@ def _validate_categories(
     unavailable = [
         category.name
         for category in rows
-        if category.id not in allow_existing and not category_visible_in_month(db, category, effective_date)
+        if category.deleted_from_month is not None
+        or category.section.deleted_from_month is not None
+        or (category.id not in allow_existing and not category_visible_in_month(db, category, effective_date))
     ]
     if unavailable:
         names = ", ".join(sorted(unavailable)[:5])
@@ -320,6 +327,7 @@ def create_manual_transaction(
     auth: AuthContext = Depends(require_write),
     db: Session = Depends(get_db),
 ) -> dict:
+    _lock_allocation_writes(db, auth.user.workspace_id)
     account = db.scalar(
         select(Account)
         .where(
@@ -392,6 +400,7 @@ def set_allocations(
     auth: AuthContext = Depends(require_write),
     db: Session = Depends(get_db),
 ) -> dict:
+    _lock_allocation_writes(db, auth.user.workspace_id)
     transaction = _transaction_for_user(db, transaction_id, auth.user.workspace_id, lock=True)
     if transaction.deleted_at:
         raise HTTPException(status_code=400, detail="Restore the transaction before categorizing it")
@@ -435,6 +444,7 @@ def set_batch_allocations(
             status_code=409,
             detail="Mosaic was updated. Reload the page before assigning transactions.",
         )
+    _lock_allocation_writes(db, auth.user.workspace_id)
     transactions = _batch_transactions_for_user(db, payload.transactions, auth.user.workspace_id)
     if any(transaction.deleted_at is not None for transaction in transactions):
         raise HTTPException(status_code=400, detail="Restore deleted transactions before categorizing them")
@@ -590,6 +600,7 @@ def update_batch_transactions(
     auth: AuthContext = Depends(require_write),
     db: Session = Depends(get_db),
 ) -> dict:
+    _lock_allocation_writes(db, auth.user.workspace_id)
     transactions = _batch_transactions_for_user(db, payload.transactions, auth.user.workspace_id)
     if any(transaction.deleted_at is not None for transaction in transactions):
         raise HTTPException(status_code=400, detail="Restore deleted transactions before modifying them")
@@ -691,6 +702,8 @@ def update_transaction(
     auth: AuthContext = Depends(require_write),
     db: Session = Depends(get_db),
 ) -> dict:
+    if payload.allocations is not None or payload.effective_date is not None:
+        _lock_allocation_writes(db, auth.user.workspace_id)
     transaction = _transaction_for_user(db, transaction_id, auth.user.workspace_id, lock=True)
     if transaction.version != payload.version:
         _conflict(transaction)

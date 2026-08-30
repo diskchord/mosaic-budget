@@ -3,18 +3,23 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import delete, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from ..db import get_db
 from ..models import (
     STRUCTURE_EPOCH,
+    Allocation,
+    BudgetTransaction,
     Category,
     CategoryBudget,
     CategoryMonthExclusion,
+    Rule,
+    RuleRevision,
     Section,
     SectionMonthExclusion,
+    Workspace,
 )
 from ..schemas import (
     BudgetAmountRequest,
@@ -22,10 +27,12 @@ from ..schemas import (
     CategoryUpdateRequest,
     SectionCreateRequest,
     SectionUpdateRequest,
+    StructureDeleteRequest,
     StructureVisibilityRequest,
 )
 from ..services.audit import write_audit
-from ..services.budgets import ensure_month_records, get_budget_state
+from ..services.budgets import ensure_month_records, get_budget_state, serialize_transaction
+from ..services.rules import rule_snapshot
 from ..services.structure import (
     availability_dict,
     category_visible_in_month,
@@ -93,7 +100,7 @@ def _reorder_sections(
     moving: Section | None = None,
     target_index: int | None = None,
 ) -> None:
-    rows = db.scalars(
+    query = (
         select(Section)
         .where(
             Section.workspace_id == workspace_id,
@@ -102,7 +109,10 @@ def _reorder_sections(
         )
         .order_by(Section.sort_order, Section.name)
         .with_for_update()
-    ).all()
+    )
+    if moving is None or moving.deleted_from_month is None:
+        query = query.where(Section.deleted_from_month.is_(None))
+    rows = db.scalars(query).all()
     ordered = [row for row in rows if moving is None or row.id != moving.id]
     if moving is not None and moving.archived_at is None:
         index = len(ordered) if target_index is None else max(0, min(int(target_index), len(ordered)))
@@ -120,12 +130,15 @@ def _reorder_categories(
     moving: Category | None = None,
     target_index: int | None = None,
 ) -> None:
-    rows = db.scalars(
+    query = (
         select(Category)
         .where(Category.section_id == section_id, Category.archived_at.is_(None))
         .order_by(Category.sort_order, Category.name)
         .with_for_update()
-    ).all()
+    )
+    if moving is None or moving.deleted_from_month is None:
+        query = query.where(Category.deleted_from_month.is_(None))
+    rows = db.scalars(query).all()
     ordered = [row for row in rows if moving is None or row.id != moving.id]
     if moving is not None and moving.archived_at is None and moving.section_id == section_id:
         index = len(ordered) if target_index is None else max(0, min(int(target_index), len(ordered)))
@@ -135,6 +148,145 @@ def _reorder_categories(
             row.sort_order = index
             if moving is None or row.id != moving.id:
                 row.version += 1
+
+
+def _rule_category_ids(actions: list[dict]) -> set[uuid.UUID]:
+    category_ids: set[uuid.UUID] = set()
+    for action in actions:
+        values: list[object] = []
+        if action.get("type") == "assign_category":
+            values.append(action.get("category_id"))
+        elif action.get("type") in {"split_fixed", "split_percent"}:
+            values.extend(part.get("category_id") for part in action.get("splits", []) if isinstance(part, dict))
+            values.append(action.get("remainder_category_id"))
+        for value in values:
+            if value:
+                try:
+                    category_ids.add(uuid.UUID(str(value)))
+                except ValueError:
+                    continue
+    return category_ids
+
+
+def _disable_rules_for_categories(
+    db: Session,
+    *,
+    workspace_id: uuid.UUID,
+    actor_user_id: uuid.UUID,
+    category_ids: set[uuid.UUID],
+) -> int:
+    if not category_ids:
+        return 0
+    rules = db.scalars(
+        select(Rule)
+        .where(Rule.workspace_id == workspace_id, Rule.archived_at.is_(None), Rule.enabled.is_(True))
+        .order_by(Rule.id)
+        .with_for_update()
+    ).all()
+    changed = 0
+    for rule in rules:
+        referenced = _rule_category_ids(rule.actions)
+        affected = referenced & category_ids
+        if not affected:
+            continue
+        before = rule_snapshot(rule)
+        rule.enabled = False
+        rule.version += 1
+        after = rule_snapshot(rule)
+        db.add(
+            RuleRevision(
+                rule_id=rule.id,
+                version=rule.version,
+                snapshot=after,
+                changed_by_id=actor_user_id,
+            )
+        )
+        write_audit(
+            db,
+            workspace_id=workspace_id,
+            actor_user_id=actor_user_id,
+            action="rule.updated",
+            object_type="rule",
+            object_id=rule.id,
+            before=before,
+            after=after,
+            detail={
+                "reason": "budget_structure_deleted",
+                "deleted_category_ids": sorted(str(category_id) for category_id in affected),
+            },
+        )
+        changed += 1
+    return changed
+
+
+def _decategorize_transactions(
+    db: Session,
+    *,
+    workspace_id: uuid.UUID,
+    actor_user_id: uuid.UUID,
+    category_ids: set[uuid.UUID],
+) -> int:
+    if not category_ids:
+        return 0
+    transaction_ids = set(
+        db.scalars(
+            select(Allocation.transaction_id)
+            .where(Allocation.category_id.in_(category_ids))
+            .distinct()
+        ).all()
+    )
+    if not transaction_ids:
+        return 0
+    transactions = db.scalars(
+        select(BudgetTransaction)
+        .where(
+            BudgetTransaction.workspace_id == workspace_id,
+            BudgetTransaction.id.in_(transaction_ids),
+        )
+        .options(
+            selectinload(BudgetTransaction.account),
+            selectinload(BudgetTransaction.allocations)
+            .selectinload(Allocation.category)
+            .selectinload(Category.section),
+        )
+        .order_by(BudgetTransaction.id)
+        .with_for_update()
+    ).all()
+    before = {transaction.id: serialize_transaction(transaction) for transaction in transactions}
+    for transaction in transactions:
+        transaction.allocations.clear()
+        transaction.manual_allocation_lock = True
+        transaction.needs_review = False
+        transaction.version += 1
+    db.flush()
+    deleted_ids = sorted(str(category_id) for category_id in category_ids)
+    for transaction in transactions:
+        write_audit(
+            db,
+            workspace_id=workspace_id,
+            actor_user_id=actor_user_id,
+            action="transaction.allocations.updated",
+            object_type="transaction",
+            object_id=transaction.id,
+            before=before[transaction.id],
+            after=serialize_transaction(transaction),
+            detail={
+                "reason": "budget_structure_deleted",
+                "deleted_category_ids": deleted_ids,
+            },
+        )
+    return len(transactions)
+
+
+def _tombstone_structure(item: Section | Category, month) -> bool:
+    changed = item.deleted_from_month is None or month < item.deleted_from_month
+    if changed:
+        item.deleted_from_month = month
+    lifetime_boundary = max(month, item.starts_month)
+    if item.ends_before_month is None or lifetime_boundary < item.ends_before_month:
+        item.ends_before_month = lifetime_boundary
+        changed = True
+    return changed
 
 
 def _change_visibility(
@@ -152,6 +304,18 @@ def _change_visibility(
 
     if isinstance(target, Section) and target.is_income and not payload.visible:
         raise HTTPException(status_code=400, detail="The Income section is protected and must exist in every month")
+    if (
+        payload.visible
+        and target.deleted_from_month is not None
+        and (payload.scope != "month" or month >= target.deleted_from_month)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This item was permanently deleted beginning "
+                f"{target.deleted_from_month.isoformat()[:7]} and cannot be restored."
+            ),
+        )
 
     changed = False
     target_id = target.id
@@ -269,6 +433,7 @@ def create_section(
         starts_month = structure_month(payload.starts_month or STRUCTURE_EPOCH)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db.scalar(select(Workspace.id).where(Workspace.id == auth.user.workspace_id).with_for_update())
     section = Section(
         workspace_id=auth.user.workspace_id,
         name=payload.name.strip(),
@@ -301,6 +466,7 @@ def update_section(
     auth: AuthContext = Depends(require_write),
     db: Session = Depends(get_db),
 ) -> dict:
+    db.scalar(select(Workspace.id).where(Workspace.id == auth.user.workspace_id).with_for_update())
     section = _section_for_user(db, section_id, auth.user.workspace_id, lock=True)
     if section.version != payload.version:
         raise HTTPException(
@@ -367,33 +533,99 @@ def set_section_visibility(
 
 
 @router.delete("/sections/{section_id}")
-def archive_section(
+def delete_section(
     section_id: uuid.UUID,
-    version: int = Body(..., embed=True, ge=1),
+    payload: StructureDeleteRequest,
     auth: AuthContext = Depends(require_write),
     db: Session = Depends(get_db),
 ) -> dict:
+    try:
+        month = structure_month(payload.month)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db.scalar(select(Workspace.id).where(Workspace.id == auth.user.workspace_id).with_for_update())
     section = _section_for_user(db, section_id, auth.user.workspace_id, lock=True)
     if section.is_income:
-        raise HTTPException(status_code=400, detail="The Income section is protected and cannot be removed")
-    if section.version != version:
+        raise HTTPException(status_code=400, detail="The Income section is protected and cannot be deleted")
+    if section.version != payload.version:
         raise HTTPException(status_code=409, detail={"message": "Section conflict", "current": section_dict(section)})
-    before = section_dict(section)
-    section.archived_at = utcnow()
-    section.version += 1
-    _reorder_sections(db, auth.user.workspace_id)
+    categories = db.scalars(
+        select(Category).where(Category.section_id == section.id).order_by(Category.id).with_for_update()
+    ).all()
+    category_ids = {category.id for category in categories}
+    before_categories = {category.id: category_dict(category) for category in categories}
+    before = {**section_dict(section), "categories": list(before_categories.values())}
+    transactions_decategorized = _decategorize_transactions(
+        db,
+        workspace_id=auth.user.workspace_id,
+        actor_user_id=auth.user.id,
+        category_ids=category_ids,
+    )
+    rules_disabled = _disable_rules_for_categories(
+        db,
+        workspace_id=auth.user.workspace_id,
+        actor_user_id=auth.user.id,
+        category_ids=category_ids,
+    )
+    changed = _tombstone_structure(section, month)
+    for category in categories:
+        if _tombstone_structure(category, month):
+            category.version += 1
+            write_audit(
+                db,
+                workspace_id=auth.user.workspace_id,
+                actor_user_id=auth.user.id,
+                action="category.deleted",
+                object_type="category",
+                object_id=category.id,
+                before=before_categories[category.id],
+                after=category_dict(category),
+                detail={"month": month.isoformat()[:7], "parent_section_id": str(section.id)},
+            )
+            changed = True
+    if changed:
+        section.version += 1
+    if category_ids:
+        db.execute(
+            delete(CategoryBudget).where(
+                CategoryBudget.category_id.in_(category_ids),
+                CategoryBudget.month >= month,
+            )
+        )
+        db.execute(
+            delete(CategoryMonthExclusion).where(
+                CategoryMonthExclusion.category_id.in_(category_ids),
+                CategoryMonthExclusion.month >= month,
+            )
+        )
+    db.execute(
+        delete(SectionMonthExclusion).where(
+            SectionMonthExclusion.section_id == section.id,
+            SectionMonthExclusion.month >= month,
+        )
+    )
     write_audit(
         db,
         workspace_id=auth.user.workspace_id,
         actor_user_id=auth.user.id,
-        action="section.archived",
+        action="section.deleted",
         object_type="section",
         object_id=section.id,
         before=before,
-        after=section_dict(section),
+        after={**section_dict(section), "categories": [category_dict(category) for category in categories]},
+        detail={
+            "month": month.isoformat()[:7],
+            "transactions_decategorized": transactions_decategorized,
+            "rules_disabled": rules_disabled,
+        },
     )
     db.commit()
-    return {"ok": True}
+    return {
+        "ok": True,
+        "changed": changed,
+        "transactions_decategorized": transactions_decategorized,
+        "rules_disabled": rules_disabled,
+    }
 
 
 @router.post("/categories")
@@ -402,9 +634,12 @@ def create_category(
     auth: AuthContext = Depends(require_write),
     db: Session = Depends(get_db),
 ) -> dict:
-    section = _section_for_user(db, payload.section_id, auth.user.workspace_id)
+    db.scalar(select(Workspace.id).where(Workspace.id == auth.user.workspace_id).with_for_update())
+    section = _section_for_user(db, payload.section_id, auth.user.workspace_id, lock=True)
     if section.archived_at:
         raise HTTPException(status_code=400, detail="Cannot add a category to an archived section")
+    if section.deleted_from_month is not None:
+        raise HTTPException(status_code=400, detail="Cannot add a category to a deleted section")
     try:
         default_planned = parse_decimal(payload.default_planned)
         starts_month = structure_month(payload.starts_month or STRUCTURE_EPOCH)
@@ -449,6 +684,7 @@ def update_category(
         current_month_date = parse_month(current_month) if current_month else None
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db.scalar(select(Workspace.id).where(Workspace.id == auth.user.workspace_id).with_for_update())
     category = _category_for_user(db, category_id, auth.user.workspace_id, lock=True)
     if category.version != payload.version:
         raise HTTPException(
@@ -460,9 +696,11 @@ def update_category(
     target_section = category.section
     moving_sections = payload.section_id is not None and payload.section_id != category.section_id
     if moving_sections:
-        target_section = _section_for_user(db, payload.section_id, auth.user.workspace_id)
+        target_section = _section_for_user(db, payload.section_id, auth.user.workspace_id, lock=True)
         if target_section.archived_at:
             raise HTTPException(status_code=400, detail="Cannot move a category into an archived section")
+        if target_section.deleted_from_month is not None:
+            raise HTTPException(status_code=400, detail="Cannot move a category into a deleted section")
         category.section_id = target_section.id
         _reorder_categories(db, original_section_id)
         _reorder_categories(db, target_section.id, category, payload.sort_order)
@@ -563,31 +801,71 @@ def set_category_visibility(
 
 
 @router.delete("/categories/{category_id}")
-def archive_category(
+def delete_category(
     category_id: uuid.UUID,
-    version: int = Body(..., embed=True, ge=1),
+    payload: StructureDeleteRequest,
     auth: AuthContext = Depends(require_write),
     db: Session = Depends(get_db),
 ) -> dict:
+    try:
+        month = structure_month(payload.month)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db.scalar(select(Workspace.id).where(Workspace.id == auth.user.workspace_id).with_for_update())
     category = _category_for_user(db, category_id, auth.user.workspace_id, lock=True)
-    if category.version != version:
+    if category.version != payload.version:
         raise HTTPException(status_code=409, detail={"message": "Category conflict", "current": category_dict(category)})
     before = category_dict(category)
-    category.archived_at = utcnow()
-    category.version += 1
-    _reorder_categories(db, category.section_id)
+    category_ids = {category.id}
+    transactions_decategorized = _decategorize_transactions(
+        db,
+        workspace_id=auth.user.workspace_id,
+        actor_user_id=auth.user.id,
+        category_ids=category_ids,
+    )
+    rules_disabled = _disable_rules_for_categories(
+        db,
+        workspace_id=auth.user.workspace_id,
+        actor_user_id=auth.user.id,
+        category_ids=category_ids,
+    )
+    changed = _tombstone_structure(category, month)
+    if changed:
+        category.version += 1
+    db.execute(
+        delete(CategoryBudget).where(
+            CategoryBudget.category_id == category.id,
+            CategoryBudget.month >= month,
+        )
+    )
+    db.execute(
+        delete(CategoryMonthExclusion).where(
+            CategoryMonthExclusion.category_id == category.id,
+            CategoryMonthExclusion.month >= month,
+        )
+    )
     write_audit(
         db,
         workspace_id=auth.user.workspace_id,
         actor_user_id=auth.user.id,
-        action="category.archived",
+        action="category.deleted",
         object_type="category",
         object_id=category.id,
         before=before,
         after=category_dict(category),
+        detail={
+            "month": month.isoformat()[:7],
+            "transactions_decategorized": transactions_decategorized,
+            "rules_disabled": rules_disabled,
+        },
     )
     db.commit()
-    return {"ok": True}
+    return {
+        "ok": True,
+        "changed": changed,
+        "transactions_decategorized": transactions_decategorized,
+        "rules_disabled": rules_disabled,
+    }
 
 
 @router.put("/budget/{month}/categories/{category_id}")
@@ -605,7 +883,7 @@ def set_budget_amount(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if planned < 0:
         raise HTTPException(status_code=400, detail="Planned amounts cannot be negative")
-    category = _category_for_user(db, category_id, auth.user.workspace_id)
+    category = _category_for_user(db, category_id, auth.user.workspace_id, lock=True)
     if not category_visible_in_month(db, category, month_date):
         raise HTTPException(status_code=400, detail="This category is not available in the selected month")
     row = db.scalar(

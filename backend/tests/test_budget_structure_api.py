@@ -40,7 +40,7 @@ def _budget_amount_audits() -> list[AuditEvent]:
         ).all()
 
 
-def test_create_move_reorder_and_archive_budget_structure() -> None:
+def test_create_move_reorder_and_delete_budget_structure() -> None:
     client, headers = _signed_in_client()
     with client:
         budget = client.get("/api/budget", params={"month": "2026-08"}).json()
@@ -99,21 +99,21 @@ def test_create_move_reorder_and_archive_budget_structure() -> None:
         latest_housing = next(section for section in latest["sections"] if section["id"] == housing["id"])
         assert [item["name"] for item in latest_housing["categories"]][1] == "Coffee"
 
-        archived_category = client.request(
+        deleted_category = client.request(
             "DELETE",
             f"/api/categories/{moved['id']}",
             headers=headers,
-            json={"version": moved["version"]},
+            json={"version": moved["version"], "month": "2026-08-01"},
         )
-        assert archived_category.status_code == 200
+        assert deleted_category.status_code == 200
 
-        archived_section = client.request(
+        deleted_section = client.request(
             "DELETE",
             f"/api/sections/{created_section['id']}",
             headers=headers,
-            json={"version": created_section["version"]},
+            json={"version": created_section["version"], "month": "2026-08-01"},
         )
-        assert archived_section.status_code == 200
+        assert deleted_section.status_code == 200
 
         latest = client.get("/api/budget", params={"month": "2026-08"}).json()
         assert all(section["name"] != "Giving" for section in latest["sections"])

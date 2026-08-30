@@ -136,6 +136,9 @@ def test_manual_rule_run_rejects_more_than_5000_candidates() -> None:
     from app.schemas import RuleRunRequest
 
     class CandidateDb:
+        def scalar(self, _query):
+            return True
+
         def scalars(self, _query) -> _Rows:
             return _Rows([uuid.uuid4()] * (MAX_MANUAL_RULE_TRANSACTIONS + 1))
 

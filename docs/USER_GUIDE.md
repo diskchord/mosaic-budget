@@ -26,19 +26,21 @@ When creating a section or category, choose when it first appears:
 - **All months** - it is also available in earlier budget history.
 - **Choose another month** - it begins on a specific future or past month.
 
-Open a section or category editor and select **Remove from budget months...** for three non-destructive choices:
+Open a section or category editor and select **Change month availability...** for three non-destructive choices:
 
 - **Beginning with this month** - earlier months remain unchanged, and the item stays hidden afterward.
 - **Only for this one month** - it disappears for the selected month and returns automatically in the next month.
 - **Archive in every month** - it is hidden throughout the budget until deliberately restored.
 
-A notice appears when the open month contains hidden items. **Manage hidden items** can:
+A notice appears at the bottom of the budget when the open month contains hidden items. **Manage hidden items** can:
 
 - show an item in only the current month,
 - resume an ended item from a chosen month while preserving the gap, or
 - restore it in all months.
 
 Hiding or ending an item does not delete it. Existing monthly plans, transaction allocations, notes, rules, and audit history remain intact. If a hidden category already contains activity in that month, the activity still contributes to cash-flow totals and is identified in the hidden-items notice.
+
+Choose **Delete category...** or **Delete section...** when the item should be gone permanently beginning with the open month. Earlier budget structure and plans remain available for history, but every transaction using a deleted category is fully uncategorized, including transactions that were split across other categories. Active transactions return to **To sort**, and rules that referenced a deleted category are turned off. A deleted item does not appear in **Manage hidden items** and cannot be restored.
 
 New transactions and automatic rules cannot be assigned to a category that is unavailable in the transaction's month. Existing historical assignments remain visible when their transactions are opened.
 

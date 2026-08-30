@@ -178,6 +178,9 @@ def _validate_rule(db: Session, workspace_id: uuid.UUID, payload: RuleRequest | 
                     Category.id.in_(category_ids),
                     Section.workspace_id == workspace_id,
                     Category.archived_at.is_(None),
+                    Category.deleted_from_month.is_(None),
+                    Section.archived_at.is_(None),
+                    Section.deleted_from_month.is_(None),
                 )
             ).all()
         )
@@ -328,6 +331,7 @@ def run_rules(
         month_start = parse_month(payload.month)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _lock_rule_set(db, auth.user.workspace_id)
     month_end = next_month(month_start)
     filters = _run_candidate_filters(auth.user.workspace_id, month_start, month_end)
     candidate_ids = db.scalars(
@@ -562,6 +566,7 @@ def apply_rule_now(
 ) -> dict:
     if scope not in {"unassigned", "eligible"}:
         raise HTTPException(status_code=400, detail="Scope must be unassigned or eligible")
+    _lock_rule_set(db, auth.user.workspace_id)
     rule = _rule_for_user(db, rule_id, auth.user.workspace_id)
     applied = _apply_existing(db, rule, scope)
     write_audit(

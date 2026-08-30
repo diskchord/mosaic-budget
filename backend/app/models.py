@@ -116,6 +116,10 @@ class Section(Base, UUIDMixin, TimestampMixin, VersionMixin):
             "ends_before_month IS NULL OR ends_before_month >= starts_month",
             name="section_month_range_valid",
         ),
+        CheckConstraint(
+            "deleted_from_month IS NULL OR date_part('day', deleted_from_month) = 1",
+            name="section_deleted_month_first_day",
+        ),
         Index("ix_sections_workspace_sort", "workspace_id", "is_income", "sort_order"),
         Index("ix_sections_workspace_lifetime", "workspace_id", "starts_month", "ends_before_month"),
     )
@@ -130,6 +134,7 @@ class Section(Base, UUIDMixin, TimestampMixin, VersionMixin):
         Date, nullable=False, default=STRUCTURE_EPOCH, server_default="1900-01-01"
     )
     ends_before_month: Mapped[date | None] = mapped_column(Date)
+    deleted_from_month: Mapped[date | None] = mapped_column(Date)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     workspace: Mapped[Workspace] = relationship(back_populates="sections")
@@ -154,6 +159,10 @@ class Category(Base, UUIDMixin, TimestampMixin, VersionMixin):
             "ends_before_month IS NULL OR ends_before_month >= starts_month",
             name="category_month_range_valid",
         ),
+        CheckConstraint(
+            "deleted_from_month IS NULL OR date_part('day', deleted_from_month) = 1",
+            name="category_deleted_month_first_day",
+        ),
         Index("ix_categories_section_sort", "section_id", "sort_order"),
         Index("ix_categories_section_lifetime", "section_id", "starts_month", "ends_before_month"),
     )
@@ -168,6 +177,7 @@ class Category(Base, UUIDMixin, TimestampMixin, VersionMixin):
         Date, nullable=False, default=STRUCTURE_EPOCH, server_default="1900-01-01"
     )
     ends_before_month: Mapped[date | None] = mapped_column(Date)
+    deleted_from_month: Mapped[date | None] = mapped_column(Date)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     section: Mapped[Section] = relationship(back_populates="categories")
