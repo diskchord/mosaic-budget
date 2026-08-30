@@ -17,17 +17,48 @@ Mosaic turns incoming transactions into a clear, visual plan for the month. Sort
 on a phone, automate the repetitive parts, and keep the original financial
 record intact. The whole application runs on infrastructure you control.
 
+## See Mosaic
+
+<p align="center">
+  <a href="artifacts/mosaic-screenshots/01-budget-desktop-citrus.png">
+    <img src="artifacts/mosaic-screenshots/01-budget-desktop-citrus.png" width="100%" alt="Mosaic's August budget showing the amount left to assign, income categories, and reorder handles">
+  </a>
+</p>
+
+<p align="center"><sub>Plan the month at a glance, then arrange sections and categories around the way your household thinks.</sub></p>
+
+| Inspect without leaving the sort | Put rules in deterministic order |
+| :---: | :---: |
+| [![A transaction editor open over the inactive sorting tray](artifacts/mosaic-screenshots/05-sort-inspection-desktop-meadow.png)](artifacts/mosaic-screenshots/05-sort-inspection-desktop-meadow.png) | [![Rules organized into cleanup, categorize, and finish phases with reorder handles](artifacts/mosaic-screenshots/07-rules-desktop-sunrise.png)](artifacts/mosaic-screenshots/07-rules-desktop-sunrise.png) |
+| Open a candidate's full transaction window, then cancel back to the tray with the selection intact. | See every phase, then drag rules into the exact order Mosaic should run them. |
+
+<p align="center">
+  <a href="artifacts/mosaic-screenshots/10-budget-mobile-meadow.png"><img src="artifacts/mosaic-screenshots/10-budget-mobile-meadow.png" width="220" alt="Mosaic monthly budget on a phone"></a>
+  <a href="artifacts/mosaic-screenshots/11-sort-tray-mobile-meadow.png"><img src="artifacts/mosaic-screenshots/11-sort-tray-mobile-meadow.png" width="220" alt="Mosaic transaction sorting tray on a phone"></a>
+</p>
+
+<p align="center"><sub>The same responsive workflow runs as an installable PWA and in the Android companion.</sub></p>
+
+<p align="center">
+  <a href="artifacts/mosaic-screenshots/00-contact-sheet.png">View all screenshots</a>
+  ·
+  <a href="artifacts/Mosaic-Screenshot-Pack.zip">Download the screenshot pack</a>
+</p>
+
+All names, transactions, account labels, and amounts shown above are synthetic
+demo data.
+
 ## Highlights
 
 - **A budget that fits real months.** Plan income and expenses, carry fund
   balances forward, and start, pause, or end categories without rewriting
-  history.
+  history. Drag sections and categories into the order that matches your plan.
 - **A fast transaction inbox.** Check several transactions and drag them as a
-  group, tap to categorize or split to the exact cent, and record cash or
-  manual activity.
+  group, inspect one without losing your place in the sort, tap to categorize
+  or split to the exact cent, and record cash or manual activity.
 - **Useful automation.** Build deterministic rules, preview their matches, or
   run the complete ruleset manually against only the selected month's unsorted
-  transactions.
+  transactions. Arrange rules within each execution phase by dragging them.
 - **Conservative bank sync.** SimpleFIN credentials are encrypted at rest;
   imports keep an append-only source history and reconcile pending transactions
   without silently discarding ambiguous records.
@@ -59,7 +90,7 @@ make up
 Open [http://localhost:8080](http://localhost:8080). The first startup applies
 the database migrations and creates the owner account and starter budget.
 
-Want to explore before entering real data?
+Want to try the same synthetic workspace shown above?
 
 ```bash
 make demo
@@ -145,6 +176,11 @@ tests in the application container.
 | `make backup` | Create and restore-verify a database backup |
 | `make demo` | Add sample data to a new workspace |
 | `make down` | Stop Mosaic without deleting its data volume |
+
+Interface screenshots must use a disposable workspace with synthetic data.
+Run `node scripts/capture-screenshots.js --help` for the capture workflow;
+`python3 scripts/build-screenshot-pack.py --check` verifies that the contact
+sheet and downloadable pack match the source images.
 
 ## Documentation
 

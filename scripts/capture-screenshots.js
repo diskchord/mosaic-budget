@@ -51,7 +51,7 @@ const SCREENSHOTS = Object.freeze({
   trayDesktop: '02-sort-tray-desktop-meadow.png',
   dragDesktop: '03-group-drag-desktop-meadow.png',
   transactionsDesktop: '04-transactions-desktop-ocean.png',
-  transactionDesktop: '05-transaction-detail-desktop-ocean.png',
+  inspectionDesktop: '05-sort-inspection-desktop-meadow.png',
   analyticsDesktop: '06-analytics-desktop-berry.png',
   rulesDesktop: '07-rules-desktop-sunrise.png',
   ruleDesktop: '08-rule-builder-desktop-sunrise.png',
@@ -654,7 +654,10 @@ class MosaicCapture {
         }).catch(() => {});
       }
     }
-    await this.waitUntil(`!document.querySelector('.drag-ghost')`, 'drag cleanup');
+    await this.waitUntil(
+      `!document.querySelector('.drag-ghost') && !document.querySelector('#transaction-tray .tx-bubble[data-dragged="true"]')`,
+      'drag cleanup',
+    );
   }
 
   async desktopSequence() {
@@ -687,6 +690,7 @@ class MosaicCapture {
         && document.querySelector('#transaction-tray.open')?.hasAttribute('inert')`,
       'the selected transaction details to open above the inactive sorting tray',
     );
+    await this.capture(SCREENSHOTS.inspectionDesktop);
     await this.click('.modal-cancel');
     await this.waitUntil(
       `!document.querySelector('#modal-root .modal')
@@ -711,7 +715,6 @@ class MosaicCapture {
     await this.capture(SCREENSHOTS.transactionsDesktop);
     await this.click('.transaction-list .transaction-card:first-child .transaction-card-content');
     await this.waitFor('#transaction-form', 'the transaction details editor');
-    await this.capture(SCREENSHOTS.transactionDesktop);
     await this.click('.modal-close');
     await this.waitUntil(`!document.querySelector('#modal-root .modal')`, 'the transaction modal to close');
 
