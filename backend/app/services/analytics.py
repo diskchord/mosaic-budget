@@ -29,6 +29,7 @@ def _eligible_transaction_filters(workspace_id: uuid.UUID) -> tuple[Any, ...]:
         BudgetTransaction.deleted_at.is_(None),
         BudgetTransaction.excluded.is_(False),
         BudgetTransaction.suppressed_by_duplicate_account.is_(False),
+        BudgetTransaction.transfer_group_id.is_(None),
         Account.is_duplicate.is_(False),
     )
 

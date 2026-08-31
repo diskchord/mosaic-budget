@@ -19,6 +19,7 @@ from ..schemas import (
     BatchTransactionUpdateRequest,
     DeleteTransactionRequest,
     ManualTransactionRequest,
+    ManualTransferRequest,
     TransactionUpdateRequest,
 )
 from ..services.audit import write_audit
@@ -35,6 +36,11 @@ from ..utils import money_str, next_month, parse_decimal, parse_month, utcnow
 from .deps import AuthContext, current_auth, require_write
 
 router = APIRouter(prefix="/api/transactions", tags=["transactions"])
+TRANSFER_EDIT_ERROR = "Transfer transactions cannot be edited individually"
+
+
+def _default_manual_payee(account: Account) -> str:
+    return "Cash transaction" if account.source_type == "manual" else "Manual transaction"
 
 
 def _lock_allocation_writes(db: Session, workspace_id: uuid.UUID) -> None:
@@ -115,6 +121,139 @@ def _lock_account_before_manual_transaction(
 
 def _conflict(transaction: BudgetTransaction, message: str = "This transaction changed on another device") -> None:
     raise HTTPException(status_code=409, detail={"message": message, "current": serialize_transaction(transaction)})
+
+
+def _transfer_group_id_for_transaction(
+    db: Session,
+    transaction_id: uuid.UUID,
+    workspace_id: uuid.UUID,
+) -> uuid.UUID | None:
+    identity = db.execute(
+        select(BudgetTransaction.id, BudgetTransaction.transfer_group_id).where(
+            BudgetTransaction.id == transaction_id,
+            BudgetTransaction.workspace_id == workspace_id,
+            BudgetTransaction.suppressed_by_duplicate_account.is_(False),
+            BudgetTransaction.account.has(Account.is_duplicate.is_(False)),
+        )
+    ).one_or_none()
+    if identity is None:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    return identity.transfer_group_id
+
+
+def _locked_transfer_group(
+    db: Session,
+    transfer_group_id: uuid.UUID,
+    selected_transaction_id: uuid.UUID,
+    workspace_id: uuid.UUID,
+) -> tuple[list[BudgetTransaction], dict[uuid.UUID, Account]]:
+    identities = db.execute(
+        select(BudgetTransaction.id, BudgetTransaction.account_id).where(
+            BudgetTransaction.workspace_id == workspace_id,
+            BudgetTransaction.transfer_group_id == transfer_group_id,
+        )
+    ).all()
+    if len(identities) != 2 or selected_transaction_id not in {identity.id for identity in identities}:
+        raise HTTPException(status_code=409, detail="Transfer pair is incomplete")
+    account_ids = {identity.account_id for identity in identities}
+    if len(account_ids) != 2:
+        raise HTTPException(status_code=409, detail="Transfer pair is invalid")
+
+    accounts = db.scalars(
+        select(Account)
+        .where(
+            Account.id.in_(account_ids),
+            Account.workspace_id == workspace_id,
+            Account.source_type == "manual",
+        )
+        .order_by(Account.id)
+        .with_for_update()
+    ).all()
+    if len(accounts) != 2:
+        raise HTTPException(status_code=409, detail="Transfer accounts are unavailable")
+    accounts_by_id = {account.id: account for account in accounts}
+
+    transactions = db.scalars(
+        select(BudgetTransaction)
+        .where(
+            BudgetTransaction.workspace_id == workspace_id,
+            BudgetTransaction.transfer_group_id == transfer_group_id,
+        )
+        .options(*_load_options())
+        .order_by(BudgetTransaction.id)
+        .with_for_update()
+    ).unique().all()
+    if (
+        len(transactions) != 2
+        or any(transaction.source_kind != "manual" for transaction in transactions)
+        or sum((Decimal(transaction.amount) for transaction in transactions), Decimal("0")) != 0
+    ):
+        raise HTTPException(status_code=409, detail="Transfer pair is invalid")
+    return transactions, accounts_by_id
+
+
+def _change_transfer_deleted_state(
+    db: Session,
+    *,
+    transfer_group_id: uuid.UUID,
+    selected_transaction_id: uuid.UUID,
+    expected_version: int,
+    deleted: bool,
+    auth: AuthContext,
+    confirmed_amount: Decimal | None = None,
+) -> BudgetTransaction:
+    transactions, accounts_by_id = _locked_transfer_group(
+        db,
+        transfer_group_id,
+        selected_transaction_id,
+        auth.user.workspace_id,
+    )
+    selected = next(transaction for transaction in transactions if transaction.id == selected_transaction_id)
+    if selected.version != expected_version:
+        _conflict(selected)
+    if deleted and confirmed_amount != Decimal(selected.amount):
+        raise HTTPException(status_code=400, detail="The confirmation amount does not match the transaction")
+
+    changed: list[tuple[BudgetTransaction, dict]] = []
+    changed_account_ids: set[uuid.UUID] = set()
+    deleted_at = utcnow() if deleted else None
+    for transaction in transactions:
+        currently_deleted = transaction.deleted_at is not None
+        if currently_deleted == deleted:
+            continue
+        before = serialize_transaction(transaction)
+        account = accounts_by_id[transaction.account_id]
+        balance_delta = -Decimal(transaction.amount) if deleted else Decimal(transaction.amount)
+        account.balance = Decimal(account.balance or 0) + balance_delta
+        account.available_balance = account.balance
+        account.version += 1
+        changed_account_ids.add(account.id)
+        transaction.deleted_at = deleted_at
+        transaction.deleted_by_id = auth.user.id if deleted else None
+        transaction.version += 1
+        changed.append((transaction, before))
+
+    if changed:
+        db.flush()
+        evaluate_balance_alerts(
+            db,
+            workspace_id=auth.user.workspace_id,
+            account_ids=changed_account_ids,
+        )
+        for transaction, before in changed:
+            write_audit(
+                db,
+                workspace_id=auth.user.workspace_id,
+                actor_user_id=auth.user.id,
+                action="transaction.deleted" if deleted else "transaction.restored",
+                object_type="transaction",
+                object_id=transaction.id,
+                before=before,
+                after=serialize_transaction(transaction),
+                detail={"transfer_group_id": str(transfer_group_id), "paired": True},
+            )
+    db.commit()
+    return selected
 
 
 def _move_date_to_month(value: date, month: date) -> date:
@@ -272,7 +411,10 @@ def list_transactions(
     else:
         query = query.where(BudgetTransaction.deleted_at.is_(None))
         if status_filter == "unassigned":
-            query = query.where(not_(BudgetTransaction.allocations.any()))
+            query = query.where(
+                not_(BudgetTransaction.allocations.any()),
+                BudgetTransaction.transfer_group_id.is_(None),
+            )
         elif status_filter == "assigned":
             query = query.where(BudgetTransaction.allocations.any())
         elif status_filter == "review":
@@ -352,7 +494,7 @@ def create_manual_transaction(
         source_kind="manual",
         effective_date=payload.effective_date,
         amount=amount,
-        payee=payload.payee.strip(),
+        payee=(payload.payee or "").strip() or _default_manual_payee(account),
         imported_description="",
         imported_extra={},
         note=payload.note,
@@ -393,6 +535,98 @@ def create_manual_transaction(
     return {"transaction": serialize_transaction(transaction)}
 
 
+@router.post("/transfers")
+def create_manual_transfer(
+    payload: ManualTransferRequest,
+    auth: AuthContext = Depends(require_write),
+    db: Session = Depends(get_db),
+) -> dict:
+    _lock_allocation_writes(db, auth.user.workspace_id)
+    if payload.from_account_id == payload.to_account_id:
+        raise HTTPException(status_code=400, detail="Transfer accounts must be different")
+    try:
+        amount = parse_decimal(payload.amount)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Transfer amount must be greater than zero")
+
+    requested_ids = {payload.from_account_id, payload.to_account_id}
+    accounts = db.scalars(
+        select(Account)
+        .where(
+            Account.id.in_(requested_ids),
+            Account.workspace_id == auth.user.workspace_id,
+            Account.source_type == "manual",
+            Account.is_active.is_(True),
+            Account.is_duplicate.is_(False),
+        )
+        .order_by(Account.id)
+        .with_for_update()
+    ).all()
+    if len(accounts) != 2:
+        raise HTTPException(status_code=404, detail="One or more transfer accounts were not found")
+    accounts_by_id = {account.id: account for account in accounts}
+    from_account = accounts_by_id[payload.from_account_id]
+    to_account = accounts_by_id[payload.to_account_id]
+    if from_account.currency != to_account.currency:
+        raise HTTPException(status_code=400, detail="Transfer accounts must use the same currency")
+
+    transfer_group_id = uuid.uuid4()
+    transaction_values = (
+        (from_account, -amount, f"Transfer to {to_account.name}"),
+        (to_account, amount, f"Transfer from {from_account.name}"),
+    )
+    transactions: list[BudgetTransaction] = []
+    for account, signed_amount, payee in transaction_values:
+        transaction = BudgetTransaction(
+            workspace_id=auth.user.workspace_id,
+            account_id=account.id,
+            source_kind="manual",
+            effective_date=payload.effective_date,
+            amount=signed_amount,
+            payee=payee,
+            imported_description="",
+            imported_extra={},
+            note=payload.note,
+            pending=False,
+            cleared=True,
+            manual_payee_lock=True,
+            manual_date_lock=True,
+            manual_allocation_lock=True,
+            transfer_group_id=transfer_group_id,
+            created_by_id=auth.user.id,
+        )
+        db.add(transaction)
+        transactions.append(transaction)
+        account.balance = Decimal(account.balance or 0) + signed_amount
+        account.available_balance = account.balance
+        account.version += 1
+
+    db.flush()
+    for transaction in transactions:
+        write_audit(
+            db,
+            workspace_id=auth.user.workspace_id,
+            actor_user_id=auth.user.id,
+            action="transaction.transfer.created",
+            object_type="transaction",
+            object_id=transaction.id,
+            after=serialize_transaction(transaction),
+            detail={"transfer_group_id": str(transfer_group_id)},
+        )
+    evaluate_balance_alerts(
+        db,
+        workspace_id=auth.user.workspace_id,
+        account_ids=requested_ids,
+    )
+    db.commit()
+    return {
+        "transfer_group_id": str(transfer_group_id),
+        "transactions": [serialize_transaction(transaction) for transaction in transactions],
+    }
+
+
 @router.put("/{transaction_id}/allocations")
 def set_allocations(
     transaction_id: uuid.UUID,
@@ -406,6 +640,8 @@ def set_allocations(
         raise HTTPException(status_code=400, detail="Restore the transaction before categorizing it")
     if transaction.version != payload.version:
         _conflict(transaction)
+    if transaction.transfer_group_id is not None:
+        raise HTTPException(status_code=400, detail=TRANSFER_EDIT_ERROR)
     before = serialize_transaction(transaction)
     try:
         _replace_allocations(db, transaction, payload.allocations, manual_lock=True)
@@ -446,6 +682,8 @@ def set_batch_allocations(
         )
     _lock_allocation_writes(db, auth.user.workspace_id)
     transactions = _batch_transactions_for_user(db, payload.transactions, auth.user.workspace_id)
+    if any(transaction.transfer_group_id is not None for transaction in transactions):
+        raise HTTPException(status_code=400, detail=TRANSFER_EDIT_ERROR)
     if any(transaction.deleted_at is not None for transaction in transactions):
         raise HTTPException(status_code=400, detail="Restore deleted transactions before categorizing them")
     if any(transaction.excluded for transaction in transactions):
@@ -602,6 +840,8 @@ def update_batch_transactions(
 ) -> dict:
     _lock_allocation_writes(db, auth.user.workspace_id)
     transactions = _batch_transactions_for_user(db, payload.transactions, auth.user.workspace_id)
+    if any(transaction.transfer_group_id is not None for transaction in transactions):
+        raise HTTPException(status_code=400, detail=TRANSFER_EDIT_ERROR)
     if any(transaction.deleted_at is not None for transaction in transactions):
         raise HTTPException(status_code=400, detail="Restore deleted transactions before modifying them")
 
@@ -707,10 +947,18 @@ def update_transaction(
     transaction = _transaction_for_user(db, transaction_id, auth.user.workspace_id, lock=True)
     if transaction.version != payload.version:
         _conflict(transaction)
+    if transaction.transfer_group_id is not None:
+        raise HTTPException(status_code=400, detail=TRANSFER_EDIT_ERROR)
     before = serialize_transaction(transaction)
-    if payload.payee is not None and payload.payee.strip() != transaction.payee:
-        transaction.payee = payload.payee.strip()
-        transaction.manual_payee_lock = True
+    if payload.payee is not None:
+        clean_payee = payload.payee.strip()
+        if not clean_payee:
+            if transaction.source_kind != "manual":
+                raise HTTPException(status_code=400, detail="Payee cannot be blank")
+            clean_payee = _default_manual_payee(transaction.account)
+        if clean_payee != transaction.payee:
+            transaction.payee = clean_payee
+            transaction.manual_payee_lock = True
     date_changed = payload.effective_date is not None and payload.effective_date != transaction.effective_date
     if payload.effective_date is not None:
         if payload.allocations is None:
@@ -766,6 +1014,24 @@ def delete_transaction(
     auth: AuthContext = Depends(require_write),
     db: Session = Depends(get_db),
 ) -> dict:
+    transfer_group_id = _transfer_group_id_for_transaction(db, transaction_id, auth.user.workspace_id)
+    if transfer_group_id is not None:
+        _lock_allocation_writes(db, auth.user.workspace_id)
+        try:
+            confirmed_amount = parse_decimal(payload.confirm_amount)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        transaction = _change_transfer_deleted_state(
+            db,
+            transfer_group_id=transfer_group_id,
+            selected_transaction_id=transaction_id,
+            expected_version=payload.version,
+            deleted=True,
+            auth=auth,
+            confirmed_amount=confirmed_amount,
+        )
+        return {"ok": True, "transaction": serialize_transaction(transaction)}
+
     locked_account = _lock_account_before_manual_transaction(db, transaction_id, auth.user.workspace_id)
     transaction = _transaction_for_user(db, transaction_id, auth.user.workspace_id, lock=True)
     if transaction.version != payload.version:
@@ -813,6 +1079,19 @@ def restore_transaction(
     auth: AuthContext = Depends(require_write),
     db: Session = Depends(get_db),
 ) -> dict:
+    transfer_group_id = _transfer_group_id_for_transaction(db, transaction_id, auth.user.workspace_id)
+    if transfer_group_id is not None:
+        _lock_allocation_writes(db, auth.user.workspace_id)
+        transaction = _change_transfer_deleted_state(
+            db,
+            transfer_group_id=transfer_group_id,
+            selected_transaction_id=transaction_id,
+            expected_version=version,
+            deleted=False,
+            auth=auth,
+        )
+        return {"transaction": serialize_transaction(transaction)}
+
     locked_account = _lock_account_before_manual_transaction(db, transaction_id, auth.user.workspace_id)
     transaction = _transaction_for_user(db, transaction_id, auth.user.workspace_id, lock=True)
     if transaction.version != version:

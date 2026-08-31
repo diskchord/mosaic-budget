@@ -193,9 +193,25 @@ class AccountBatchUpdateRequest(BaseModel):
         return accounts
 
 
+class ManualAccountCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    starting_balance: str = "0"
+    is_budget: bool = True
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def name_must_not_be_blank(cls, name: Any) -> Any:
+        if not isinstance(name, str):
+            return name
+        clean_name = name.strip()
+        if not clean_name:
+            raise ValueError("Account name cannot be blank")
+        return clean_name
+
+
 class TransactionUpdateRequest(BaseModel):
     version: int = Field(ge=1)
-    payee: str | None = Field(default=None, min_length=1, max_length=500)
+    payee: str | None = Field(default=None, max_length=500)
     effective_date: date | None = None
     allocations: list[AllocationInput] | None = Field(default=None, max_length=100)
     note: str | None = Field(default=None, max_length=10000)
@@ -209,9 +225,17 @@ class ManualTransactionRequest(BaseModel):
     account_id: UUID
     effective_date: date
     amount: str
-    payee: str = Field(min_length=1, max_length=500)
+    payee: str | None = Field(default=None, max_length=500)
     note: str = Field(default="", max_length=10000)
     allocations: list[AllocationInput] = Field(default_factory=list, max_length=100)
+
+
+class ManualTransferRequest(BaseModel):
+    from_account_id: UUID
+    to_account_id: UUID
+    effective_date: date
+    amount: str
+    note: str = Field(default="", max_length=10000)
 
 
 class DeleteTransactionRequest(BaseModel):

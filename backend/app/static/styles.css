@@ -536,6 +536,8 @@ body.reordering { cursor:grabbing; }
 @media (max-width: 560px) {
   .view-header { flex-direction:column; align-items:stretch; gap:12px; }
   .view-actions { justify-content:flex-start; }
+  .settings-card > header { flex-wrap:wrap; }
+  .settings-card > header > .button-row { width:100%; }
   .transaction-selection-bar { flex-wrap:wrap; }
   .transaction-selection-bar .button-row { width:100%; display:grid; grid-template-columns:auto auto minmax(0,1fr); }
 }

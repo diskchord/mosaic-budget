@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added owner-created manual cash accounts, atomic paired transfers with balance-safe delete/restore behavior, and optional cash payees with a stable default
 - Moved the hidden-items notice below the full budget and added permanent month-forward section/category deletion that safely uncategorizes affected transactions and turns off dependent rules
 - Made single-category sorting the transaction editor default, with splitting available as a secondary action
 - Enlarged the floating **To sort** control across phone and desktop layouts and centered its icon, count, and label

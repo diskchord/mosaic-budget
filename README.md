@@ -55,7 +55,8 @@ demo data.
   history. Drag sections and categories into the order that matches your plan.
 - **A fast transaction inbox.** Check several transactions and drag them as a
   group, inspect one without losing your place in the sort, tap to categorize
-  or split to the exact cent, and record cash or manual activity.
+  or split to the exact cent, add manual cash accounts, and move money between
+  them with one linked transfer.
 - **Useful automation.** Build deterministic rules, preview their matches, or
   run the complete ruleset manually against only the selected month's unsorted
   transactions. Arrange rules within each execution phase by dragging them.
@@ -195,9 +196,10 @@ sheet and downloadable pack match the source images.
 | [Changelog](CHANGELOG.md) | Released and unreleased changes |
 
 Mosaic is deliberately online-first: it does not queue financial writes while
-offline. Transfer pairing and formal account reconciliation are not yet complete
-accounting subsystems. Stage the application and verify backups before trusting
-it with the only copy of financial data.
+offline. Manual cash-account transfers are paired, but automatic matching of
+imported transfer entries and formal account reconciliation are not yet complete
+accounting subsystems. Stage the application and verify backups before trusting it
+with the only copy of financial data.
 
 ## Contributing and security
 

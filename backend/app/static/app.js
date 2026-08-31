@@ -505,6 +505,24 @@ function catalogCategoryById(id) {
 
 function accountCatalog() { return state.budget?.account_catalog || state.budget?.accounts || []; }
 function accountById(id) { return accountCatalog().find(account => account.id === id) || null; }
+function activeManualAccounts() {
+  return (state.budget?.accounts || []).filter(account => (
+    account.source_type === 'manual' && account.is_active && !account.is_duplicate
+  ));
+}
+
+function accountOptionsFor(accounts, selected = '') {
+  return accounts.map(account => (
+    `<option value="${account.id}" ${account.id === selected ? 'selected' : ''}>${escapeHtml(account.name)}</option>`
+  )).join('');
+}
+
+function defaultTransactionDate() {
+  const today = new Date();
+  const localDate = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
+  return localDate.slice(0, 7) === state.month ? localDate : `${state.month}-01`;
+}
+
 function transactionById(id) {
   return state.budget?.unassigned?.find(item => item.id === id) || state.transactions.find(item => item.id === id) || null;
 }
@@ -1561,6 +1579,7 @@ function openCategoryEditor(categoryId = null, sectionId = null) {
 function trayTransactions() {
   return (state.budget?.unassigned || []).filter(transaction => (
     !transaction.allocations?.length
+    && !transaction.transfer_group_id
     && !transaction.excluded
     && !transaction.deleted_at
     && !transaction.suppressed_by_duplicate_account
@@ -2125,6 +2144,7 @@ function installBubbleDrag() {
 
 function transactionCategoryText(transaction) {
   if (transaction.deleted_at) return 'Trash';
+  if (transaction.transfer_group_id) return 'Transfer';
   if (!transaction.allocations?.length) return 'Unassigned';
   if (transaction.allocations.length === 1) {
     const part = transaction.allocations[0];
@@ -2133,12 +2153,18 @@ function transactionCategoryText(transaction) {
   return `Split across ${transaction.allocations.length} categories`;
 }
 
+function transactionCanBulkEdit(transaction) {
+  return !transaction.deleted_at && !transaction.transfer_group_id;
+}
+
 function selectedListTransactions() {
-  return state.transactions.filter(transaction => state.selectedListTransactionIds.has(transaction.id));
+  return state.transactions.filter(transaction => (
+    transactionCanBulkEdit(transaction) && state.selectedListTransactionIds.has(transaction.id)
+  ));
 }
 
 function reconcileTransactionListSelection() {
-  const visibleTransactions = new Map(state.transactions.filter(transaction => !transaction.deleted_at).map(transaction => [transaction.id, transaction]));
+  const visibleTransactions = new Map(state.transactions.filter(transactionCanBulkEdit).map(transaction => [transaction.id, transaction]));
   let changedCount = 0;
   for (const id of state.selectedListTransactionIds) {
     const transaction = visibleTransactions.get(id);
@@ -2176,7 +2202,7 @@ function clearTransactionListSelection() {
 
 function toggleTransactionListSelection(transactionId, selected = null) {
   const transaction = state.transactions.find(item => item.id === transactionId);
-  if (!transaction || transaction.deleted_at) return;
+  if (!transaction || !transactionCanBulkEdit(transaction)) return;
   const shouldSelect = selected ?? !state.selectedListTransactionIds.has(transactionId);
   if (shouldSelect) {
     if (state.selectedListTransactionIds.size >= MAX_BULK_TRANSACTIONS) { toast(`You can edit up to ${MAX_BULK_TRANSACTIONS} transactions at once.`, 'error'); return; }
@@ -2191,7 +2217,7 @@ function toggleTransactionListSelection(transactionId, selected = null) {
 }
 
 function selectTransactionListRange(transactionId, additive = false) {
-  const ids = state.transactions.filter(transaction => !transaction.deleted_at).map(transaction => transaction.id);
+  const ids = state.transactions.filter(transactionCanBulkEdit).map(transaction => transaction.id);
   const targetIndex = ids.indexOf(transactionId);
   const anchorIndex = ids.indexOf(state.listSelectionAnchorId);
   if (targetIndex < 0) return;
@@ -2216,7 +2242,7 @@ function selectTransactionListRange(transactionId, additive = false) {
 }
 
 function selectAllVisibleTransactions() {
-  const visible = state.transactions.filter(transaction => !transaction.deleted_at);
+  const visible = state.transactions.filter(transactionCanBulkEdit);
   state.selectedListTransactionIds.clear();
   state.listSelectionVersions.clear();
   visible.slice(0, MAX_BULK_TRANSACTIONS).forEach(transaction => {
@@ -2224,12 +2250,13 @@ function selectAllVisibleTransactions() {
     state.listSelectionVersions.set(transaction.id, transaction.version);
   });
   if (visible.length > MAX_BULK_TRANSACTIONS) toast(`Only the first ${MAX_BULK_TRANSACTIONS} visible transactions were selected.`, 'error');
-  state.listSelectionAnchorId = state.transactions.find(transaction => !transaction.deleted_at)?.id || null;
+  state.listSelectionAnchorId = visible[0]?.id || null;
   syncTransactionListSelection();
 }
 
 function transactionCard(transaction) {
   const inflow = toUnits(transaction.amount) > 0n;
+  const transfer = !!transaction.transfer_group_id;
   const label = transactionLabel(transaction);
   const symbol = label.trim().slice(0, 1).toUpperCase() || '?';
   const description = `${label}, ${money(transaction.amount)}, ${formatDate(transaction.effective_date)}`;
@@ -2237,13 +2264,16 @@ function transactionCard(transaction) {
     transaction.pending ? '<span class="pending-badge">Pending</span>' : '',
     transaction.needs_review ? '<span class="review-badge">Review</span>' : '',
     transaction.excluded ? '<span class="excluded-badge">Excluded</span>' : '',
+    transfer ? '<span class="pill">Transfer</span>' : '',
   ].join('');
   return `<article class="transaction-card ${transaction.deleted_at ? 'is-deleted' : ''}" data-transaction-id="${transaction.id}">
-    ${transaction.deleted_at ? '' : `<label class="transaction-list-select-control" title="Select ${escapeHtml(label)}"><input class="transaction-list-select" type="checkbox" aria-label="Select ${escapeHtml(description)}"><span class="transaction-list-select-mark" aria-hidden="true"></span></label>`}
+    ${transaction.deleted_at ? '' : transfer
+      ? '<span title="Linked transfers are managed as a pair" aria-hidden="true" style="width:44px;display:grid;place-items:center;color:var(--muted);font-size:1.2rem">⇄</span>'
+      : `<label class="transaction-list-select-control" title="Select ${escapeHtml(label)}"><input class="transaction-list-select" type="checkbox" aria-label="Select ${escapeHtml(description)}"><span class="transaction-list-select-mark" aria-hidden="true"></span></label>`}
     <button class="transaction-card-content" type="button" aria-label="Open ${escapeHtml(description)}">
       <div class="transaction-symbol ${inflow ? 'inflow' : ''}">${escapeHtml(symbol)}</div>
       <div class="transaction-copy"><strong>${escapeHtml(label)} ${badges}</strong><small>${escapeHtml(formatDate(transaction.effective_date))} · ${escapeHtml(transaction.account_name)} · ${escapeHtml(transactionCategoryText(transaction))}</small></div>
-      <div class="transaction-amount ${inflow ? 'inflow' : ''}">${money(transaction.amount, { plus: true })}<small>${transaction.source_kind === 'manual' ? 'Manual' : 'Synced'}</small></div>
+      <div class="transaction-amount ${inflow ? 'inflow' : ''}">${money(transaction.amount, { plus: true })}<small>${transfer ? 'Transfer' : transaction.source_kind === 'manual' ? 'Manual' : 'Synced'}</small></div>
     </button>
   </article>`;
 }
@@ -2261,7 +2291,7 @@ async function renderTransactions() {
     ['active', 'All'], ['unassigned', 'Unassigned'], ['assigned', 'Assigned'], ['review', 'Needs review'], ['pending', 'Pending'], ['excluded', 'Excluded'], ['trash', 'Trash'],
   ];
   $('#app-view').innerHTML = `
-    <header class="view-header"><div><h1>${escapeHtml(title)}</h1><p>${category ? `${escapeHtml(category.section.name)} · ${monthLabel(state.month)} · Select from the left edge to edit a group.` : 'Search, review, or recategorize entries. Select from the left edge to edit a group.'}</p></div><div class="view-actions"><button class="button button--primary add-manual" type="button">+ Add transaction</button></div></header>
+    <header class="view-header"><div><h1>${escapeHtml(title)}</h1><p>${category ? `${escapeHtml(category.section.name)} · ${monthLabel(state.month)} · Select from the left edge to edit a group.` : 'Search, review, or recategorize entries. Select from the left edge to edit a group.'}</p></div><div class="view-actions"><button class="button button--soft move-money" type="button">Move money</button><button class="button button--primary add-manual" type="button">+ Add transaction</button></div></header>
     <div class="toolbar">
       <label class="search-field"><span data-icon="search"></span><input id="transaction-search" type="search" placeholder="Search payee, source text, or note" value="${escapeHtml(state.transactionSearch)}"></label>
       <div class="filter-row">${filters.map(([value, label]) => `<button class="filter-chip ${state.transactionStatus === value ? 'active' : ''}" type="button" data-filter="${value}">${label}</button>`).join('')}${category ? '<button class="filter-chip clear-category" type="button">Clear category filter ×</button>' : ''}</div>
@@ -2272,6 +2302,7 @@ async function renderTransactions() {
     </div>
     <div class="transaction-list">${state.transactions.map(transactionCard).join('') || '<div class="empty-state"><strong>No matching transactions</strong>Try another filter or add a manual cash transaction.</div>'}</div>`;
   hydrateIcons($('#app-view'));
+  $('.move-money', $('#app-view')).addEventListener('click', openTransferEditor);
   $('.add-manual', $('#app-view')).addEventListener('click', openManualTransaction);
   $$('.filter-chip[data-filter]', $('#app-view')).forEach(button => button.addEventListener('click', async () => {
     clearTransactionListSelection();
@@ -2551,16 +2582,22 @@ async function openTransactionEditor(transactionId, {
   if (!keepTrayOpen) closeTray();
   const inflow = toUnits(transaction.amount) > 0n;
   const deleted = !!transaction.deleted_at;
+  const transfer = !!transaction.transfer_group_id;
+  const manual = transaction.source_kind === 'manual';
   openModal({
-    title: deleted ? 'Transaction in Trash' : 'Transaction details',
+    title: deleted ? (transfer ? 'Transfer in Trash' : 'Transaction in Trash') : (transfer ? 'Transfer details' : 'Transaction details'),
     className: 'modal--wide',
     returnFocus,
     body: `<div class="transaction-hero">
       <div><h3>${escapeHtml(transactionLabel(transaction))}</h3><p>${escapeHtml(transaction.account_name)} · ${escapeHtml(formatDate(transaction.effective_date))}${transaction.pending ? ' · Pending' : ''}</p></div>
       <div class="hero-amount ${inflow ? 'positive' : ''}">${money(transaction.amount, { plus: true })}</div>
     </div>
-    ${deleted ? `<div class="delete-warning">Deleted ${escapeHtml(relativeTime(transaction.deleted_at))}. It is excluded from budgets and will not be recreated by synchronization.</div>` : `<form id="transaction-form" class="form-grid" data-transaction-id="${escapeHtml(transaction.id)}">
-      <label>Payee<input id="transaction-payee" value="${escapeHtml(transaction.payee)}" required maxlength="500"></label>
+    ${deleted
+      ? `<div class="delete-warning">Deleted ${escapeHtml(relativeTime(transaction.deleted_at))}. ${transfer ? 'Both linked entries are in Trash and both manual account balances were reversed.' : 'It is excluded from budgets and will not be recreated by synchronization.'}</div>`
+      : transfer
+        ? `${transaction.note ? `<div class="form-section"><strong>Note</strong><p>${escapeHtml(transaction.note)}</p></div>` : ''}`
+        : `<form id="transaction-form" class="form-grid" data-transaction-id="${escapeHtml(transaction.id)}">
+      <label>${manual ? 'Payee or source (optional)' : 'Payee'}<input id="transaction-payee" value="${escapeHtml(transaction.payee)}" ${manual ? 'placeholder="Cash transaction"' : 'required'} maxlength="500"></label>
       <label>Budget date<input id="transaction-date" type="date" value="${escapeHtml(transaction.effective_date)}" required></label>
       <label class="full">Note<textarea id="transaction-note" maxlength="10000">${escapeHtml(transaction.note || '')}</textarea></label>
       <label class="full"><span><input id="transaction-review" type="checkbox" style="width:auto;min-height:auto" ${transaction.needs_review ? 'checked' : ''}> Keep in Needs Review</span></label>
@@ -2572,11 +2609,15 @@ async function openTransactionEditor(transactionId, {
       <div class="split-summary ${transaction.allocations?.length > 1 ? '' : 'hidden'}" role="status" aria-live="polite"></div>
       <button class="button button--ghost assign-remainder ${transaction.allocations?.length > 1 ? '' : 'hidden'}" type="button">Fill remainder</button>
     </div>`}
-    <div class="form-section"><details><summary>Imported source details</summary><p class="muted">${escapeHtml(transaction.imported_description || 'Manual transaction')}</p><p class="muted">Source: ${escapeHtml(transaction.source_kind)} · Revision ${transaction.version}</p></details></div>
-    ${!deleted ? '<div class="form-section button-row"><button class="button button--soft create-rule-from-transaction" type="button">Create rule from this transaction</button><button class="button button--danger delete-transaction" type="button">Delete transaction</button></div>' : ''}`,
+    ${transfer ? '' : `<div class="form-section"><details><summary>Imported source details</summary><p class="muted">${escapeHtml(transaction.imported_description || 'Manual transaction')}</p><p class="muted">Source: ${escapeHtml(transaction.source_kind)} · Revision ${transaction.version}</p></details></div>`}
+    ${!deleted ? transfer
+      ? '<div class="form-section button-row"><button class="button button--danger delete-transaction" type="button">Delete transfer</button></div>'
+      : '<div class="form-section button-row"><button class="button button--soft create-rule-from-transaction" type="button">Create rule from this transaction</button><button class="button button--danger delete-transaction" type="button">Delete transaction</button></div>' : ''}`,
     footer: deleted
-      ? '<button class="button modal-cancel" type="button">Close</button><button class="button button--primary restore-transaction" type="button">Restore transaction</button>'
-      : '<button class="button modal-cancel" type="button">Cancel</button><button class="button button--primary save-transaction" type="button">Save changes</button>',
+      ? `<button class="button modal-cancel" type="button">Close</button><button class="button button--primary restore-transaction" type="button">Restore ${transfer ? 'transfer' : 'transaction'}</button>`
+      : transfer
+        ? '<button class="button modal-cancel" type="button">Close</button>'
+        : '<button class="button modal-cancel" type="button">Cancel</button><button class="button button--primary save-transaction" type="button">Save changes</button>',
     onMount(root) {
       $('.modal-cancel', root).addEventListener('click', closeModal);
       if (deleted) {
@@ -2584,30 +2625,33 @@ async function openTransactionEditor(transactionId, {
           setButtonBusy(event.currentTarget, true);
           try {
             await withConflict(body => api(`/api/transactions/${transaction.id}/restore`, { method: 'POST', body }), { version: transaction.version }, 'restore');
-            closeModal(); toast('Transaction restored'); await refreshCurrentView();
+            closeModal(); toast(transfer ? 'Transfer restored' : 'Transaction restored'); await refreshCurrentView();
           } catch (error) { toast(error.message, 'error'); } finally { setButtonBusy(event.currentTarget, false); }
         });
         return;
       }
-      bindAllocationRows(root, transaction);
-      $$('#transaction-form input, #transaction-form textarea, #transaction-form select', root).forEach(control => control.addEventListener('input', () => { state.formDirty = true; }));
-      $('.create-rule-from-transaction', root).addEventListener('click', () => { closeModal(); openRuleEditor(null, transaction); });
       $('.delete-transaction', root).addEventListener('click', async () => {
         const expected = unitsToString(toUnits(transaction.amount) < 0n ? -toUnits(transaction.amount) : toUnits(transaction.amount));
         const accepted = await confirmDialog({
-          title: 'Delete this transaction?',
-          message: 'It will leave all budget totals and move to Trash. A synced transaction keeps a minimal tombstone so the next import cannot bring it back.',
-          confirmText: 'Delete transaction', danger: true,
+          title: transfer ? 'Delete this transfer?' : 'Delete this transaction?',
+          message: transfer
+            ? 'Both linked entries will move to Trash and both manual account balances will be reversed.'
+            : 'It will leave all budget totals and move to Trash. A synced transaction keeps a minimal tombstone so the next import cannot bring it back.',
+          confirmText: transfer ? 'Delete transfer' : 'Delete transaction', danger: true,
           inputLabel: `Type the amount ${expected} to confirm`, expected,
         });
         if (!accepted) return;
         try {
           await withConflict(body => api(`/api/transactions/${transaction.id}`, { method: 'DELETE', body }), {
             version: transaction.version, confirm: true, confirm_amount: transaction.amount,
-          }, 'deletion');
-          closeModal(); toast('Transaction moved to Trash'); await refreshCurrentView();
+          }, transfer ? 'transfer deletion' : 'deletion');
+          closeModal(); toast(transfer ? 'Transfer moved to Trash' : 'Transaction moved to Trash'); await refreshCurrentView();
         } catch (error) { toast(error.message, 'error'); }
       });
+      if (transfer) return;
+      bindAllocationRows(root, transaction);
+      $$('#transaction-form input, #transaction-form textarea, #transaction-form select', root).forEach(control => control.addEventListener('input', () => { state.formDirty = true; }));
+      $('.create-rule-from-transaction', root).addEventListener('click', () => { closeModal(); openRuleEditor(null, transaction); });
       const save = async () => {
         let allocations;
         try { allocations = allocationPayload(root, transaction); }
@@ -2623,7 +2667,7 @@ async function openTransactionEditor(transactionId, {
             excluded: $('#transaction-excluded', root).checked,
           };
           const editedPayee = $('#transaction-payee', root).value.trim();
-          if (editedPayee !== transaction.payee) body.payee = editedPayee;
+          if (manual || editedPayee !== transaction.payee) body.payee = editedPayee;
           const updated = await withConflict(
             conflictBody => api(`/api/transactions/${transaction.id}`, { method: 'PATCH', body: conflictBody }),
             body,
@@ -2639,19 +2683,80 @@ async function openTransactionEditor(transactionId, {
   });
 }
 
+function openTransferEditor() {
+  const accounts = activeManualAccounts();
+  if (accounts.length < 2) {
+    toast(state.me?.user?.is_admin
+      ? 'Add at least two active manual accounts before moving money.'
+      : 'Two active manual accounts are needed. Ask the owner to add another account.', 'error');
+    return;
+  }
+  const defaultFrom = accounts.find(account => account.name.toLowerCase() === 'cash wallet') || accounts[0];
+  const defaultTo = accounts.find(account => account.id !== defaultFrom.id);
+  openModal({
+    title: 'Move money between accounts',
+    body: `<form id="transfer-form" class="form-grid">
+      <label>From account<select id="transfer-from">${accountOptionsFor(accounts, defaultFrom.id)}</select></label>
+      <label>To account<select id="transfer-to">${accountOptionsFor(accounts, defaultTo.id)}</select></label>
+      <label>Amount<input id="transfer-amount" inputmode="decimal" placeholder="0.00" required></label>
+      <label>Date<input id="transfer-date" type="date" value="${defaultTransactionDate()}" required></label>
+      <label class="full">Note (optional)<textarea id="transfer-note" maxlength="10000"></textarea></label>
+    </form>`,
+    footer: '<button class="button modal-cancel" type="button">Cancel</button><button class="button button--primary create-transfer" type="submit" form="transfer-form">Move money</button>',
+    onMount(root) {
+      $('.modal-cancel', root).addEventListener('click', closeModal);
+      const fromSelect = $('#transfer-from', root);
+      const toSelect = $('#transfer-to', root);
+      const syncAccounts = () => {
+        $$('option', toSelect).forEach(option => { option.disabled = option.value === fromSelect.value; });
+        if (toSelect.value === fromSelect.value) {
+          toSelect.value = accounts.find(account => account.id !== fromSelect.value)?.id || '';
+        }
+      };
+      fromSelect.addEventListener('change', syncAccounts);
+      syncAccounts();
+      const save = async () => {
+        const fromAccountId = fromSelect.value;
+        const toAccountId = toSelect.value;
+        if (fromAccountId === toAccountId) { toast('Choose two different accounts.', 'error'); toSelect.focus(); return; }
+        let amount;
+        try { amount = toUnits($('#transfer-amount', root).value); }
+        catch { toast('Enter a valid amount.', 'error'); $('#transfer-amount', root).focus(); return; }
+        if (amount <= 0n) { toast('Enter a positive amount.', 'error'); $('#transfer-amount', root).focus(); return; }
+        const button = $('.create-transfer', root); setButtonBusy(button, true, 'Moving…');
+        try {
+          await api('/api/transactions/transfers', {
+            method: 'POST',
+            body: {
+              from_account_id: fromAccountId,
+              to_account_id: toAccountId,
+              effective_date: $('#transfer-date', root).value,
+              amount: unitsToString(amount),
+              note: $('#transfer-note', root).value,
+            },
+          });
+          const fromAccount = accounts.find(account => account.id === fromAccountId);
+          const toAccount = accounts.find(account => account.id === toAccountId);
+          state.formDirty = false; closeModal();
+          toast(`${money(unitsToString(amount))} moved from ${fromAccount.name} to ${toAccount.name}`);
+          await refreshCurrentView();
+        } catch (error) { toast(error.message, 'error'); } finally { setButtonBusy(button, false); }
+      };
+      $('#transfer-form', root).addEventListener('submit', event => { event.preventDefault(); save(); });
+    },
+  });
+}
+
 function openManualTransaction() {
   const defaultAccount = state.budget?.accounts?.find(account => account.source_type === 'manual') || state.budget?.accounts?.[0];
   if (!defaultAccount) { toast('Create or sync an account before adding a transaction.', 'error'); return; }
-  const today = new Date();
-  const localDate = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
-  const defaultDate = localDate.slice(0, 7) === state.month ? localDate : `${state.month}-01`;
   openModal({
     title: 'Add a cash or manual transaction',
     body: `<form id="manual-form" class="form-grid">
       <label>Type<select id="manual-direction"><option value="outflow">Expense</option><option value="inflow">Income</option></select></label>
       <label>Amount<input id="manual-amount" inputmode="decimal" placeholder="0.00" required></label>
-      <label>Payee or source<input id="manual-payee" maxlength="500" required></label>
-      <label>Date<input id="manual-date" type="date" value="${defaultDate}" required></label>
+      <label>Payee or source (optional)<input id="manual-payee" maxlength="500" placeholder="Cash transaction"></label>
+      <label>Date<input id="manual-date" type="date" value="${defaultTransactionDate()}" required></label>
       <label>Account<select id="manual-account">${state.budget.accounts.map(account => `<option value="${account.id}" ${account.id === defaultAccount.id ? 'selected' : ''}>${escapeHtml(account.name)}</option>`).join('')}</select></label>
       <label>Category<select id="manual-category"><option value="">Leave unassigned</option>${categoryOptions()}</select></label>
       <label class="full">Note<textarea id="manual-note" maxlength="10000"></textarea></label>
@@ -3087,27 +3192,28 @@ async function renderMore() {
   const duplicateAccountCount = allAccounts.filter(account => account.is_duplicate).length;
   const inactiveAccountCount = allAccounts.filter(account => !account.is_duplicate && !account.is_active).length;
   const hiddenAccountCount = duplicateAccountCount + inactiveAccountCount;
+  const hiddenAccountSummary = [
+    duplicateAccountCount ? `${duplicateAccountCount} duplicate` : '',
+    inactiveAccountCount ? `${inactiveAccountCount} inactive` : '',
+  ].filter(Boolean).join(' · ');
+  const canMoveMoney = activeManualAccounts().length >= 2;
   const accountCards = allAccounts.filter(account => account.is_active && !account.is_duplicate).map(account => {
     const status = account.is_budget ? 'On budget' : 'Off budget';
     return `<div class="connection-card" data-account-id="${account.id}"><div class="connection-top"><div><strong>${escapeHtml(account.name)}</strong><small>${escapeHtml(account.source_type === 'manual' ? 'Manual account' : 'SimpleFIN account')} · ${escapeHtml(status)}</small></div><div class="account-card-actions"><b>${money(account.balance)}</b>${admin ? `<button class="icon-button edit-account-name" type="button" aria-label="Rename ${escapeHtml(account.name)}"><span data-icon="pencil"></span></button>` : ''}</div></div></div>`;
   }).join('');
-  const hiddenAccountNote = [
-    duplicateAccountCount ? `${duplicateAccountCount} duplicate account${duplicateAccountCount === 1 ? ' is' : 's are'} hidden here.` : '',
-    inactiveAccountCount ? `${inactiveAccountCount} inactive account${inactiveAccountCount === 1 ? ' is' : 's are'} hidden here.` : '',
-  ].filter(Boolean).join(' ');
   const emptyAccounts = hiddenAccountCount
     ? `<div class="empty-state"><strong>No accounts to show</strong>${hiddenAccountCount} account${hiddenAccountCount === 1 ? ' is' : 's are'} inactive or duplicate and hidden from this list.</div>`
-    : '<div class="empty-state"><strong>No accounts yet</strong>Connect a bank or add a manual transaction after an account is available.</div>';
+    : `<div class="empty-state"><strong>No accounts yet</strong>${admin ? 'Add a manual account or connect a bank.' : 'Ask the owner to add a manual account or connect a bank.'}</div>`;
   $('#app-view').innerHTML = `<header class="view-header"><div><h1>More</h1><p>Appearance, bank connections, people, and system reliability.</p></div></header>
     <div class="settings-grid">
       <section class="settings-card"><header><div><h2>${escapeHtml(state.me.user.display_name)}</h2><p>${escapeHtml(state.me.user.email)}${admin ? ' · Owner' : ''}</p></div><span class="avatar-button profile-avatar" aria-hidden="true">${escapeHtml(initials(state.me.user.display_name))}</span></header><div class="button-row"><button class="button button--soft sessions-button" type="button">Signed-in devices</button><button class="button logout-button" type="button">Sign out</button></div></section>
       <section class="settings-card"><header><div><h2>Your theme</h2><p>Appearance is saved independently for each user.</p></div></header><div class="theme-grid">${themes.map(theme => { const meta = THEME_META[theme] || { label: theme, colors: [] }; return `<button class="theme-choice ${state.me.user.theme === theme ? 'active' : ''}" data-theme-choice="${theme}" type="button"><span class="theme-swatches">${meta.colors.map(color => `<i style="--swatch:${color}"></i>`).join('')}</span><strong>${escapeHtml(meta.label)}</strong></button>`; }).join('')}</div>
         <div class="form-grid" style="margin-top:13px"><label>Layout density<select id="preference-density"><option value="comfortable" ${state.me.user.preferences?.density !== 'compact' ? 'selected' : ''}>Comfortable</option><option value="compact" ${state.me.user.preferences?.density === 'compact' ? 'selected' : ''}>Compact</option></select></label><label>Motion<select id="preference-motion"><option value="full" ${state.me.user.preferences?.motion !== 'reduced' ? 'selected' : ''}>Full</option><option value="reduced" ${state.me.user.preferences?.motion === 'reduced' ? 'selected' : ''}>Reduced</option></select></label></div>
       </section>
-      <section class="settings-card"><header><div><h2>Bank connections</h2><p>SimpleFIN imports continue in the background; opening this page does not trigger a bank request.</p></div>${admin ? '<button class="button button--primary add-connection" type="button">+ Connect</button>' : ''}</header>
+      <section class="settings-card"><header><h2>Bank connections</h2>${admin ? '<button class="button button--primary add-connection" type="button">+ Connect</button>' : ''}</header>
         <div class="connection-list">${connections.map(connection => `<div class="connection-card" data-connection-id="${connection.id}"><div class="connection-top"><div><strong>${escapeHtml(connection.name)}</strong><small>Every ${connection.sync_interval_minutes / 60} hours · Next ${escapeHtml(relativeTime(connection.next_sync_at))}</small></div><button class="icon-button connection-details" type="button">›</button></div><div class="health-line"><span class="status-dot"></span>${connectionHealthMarkup(connection)}</div>${connection.last_error_message ? `<p class="danger">${escapeHtml(connection.last_error_message)}</p>` : ''}</div>`).join('') || '<div class="empty-state"><strong>No bank connected</strong>Manual and cash budgeting still work. The owner can add SimpleFIN here.</div>'}</div>
       </section>
-      <section class="settings-card"><header><div><h2>Accounts</h2><p>Balances shown are the latest values retained by Mosaic.${admin ? ' Use edit to give any account a familiar name.' : ''}${hiddenAccountNote ? ` ${escapeHtml(hiddenAccountNote)} Imported accounts remain available inside their bank connection.` : ''}</p></div></header>${accountCards || emptyAccounts}</section>
+      <section class="settings-card"><header><div><h2>Accounts</h2>${hiddenAccountSummary ? `<p>Hidden: ${escapeHtml(hiddenAccountSummary)}</p>` : ''}</div><div class="button-row"><button class="button button--soft move-money-accounts" type="button" ${canMoveMoney ? '' : 'disabled title="Add two active manual accounts to move money"'}>Move money</button>${admin ? '<button class="button button--primary add-account" type="button">+ Account</button>' : ''}</div></header>${accountCards || emptyAccounts}</section>
       ${admin ? `<section class="settings-card"><header><div><h2>People</h2><p>Multiple devices can be active at once. Conflicting edits require an explicit choice.</p></div><button class="button button--soft add-user" type="button">+ User</button></header><div class="user-list">${state.users.map(user => `<div class="user-row" data-user-id="${user.id}"><div><strong>${escapeHtml(user.display_name)} ${user.is_admin ? '<span class="pill">Owner</span>' : ''}</strong><small>${escapeHtml(user.email)} · ${user.is_active ? 'Active' : 'Disabled'}</small></div><button class="icon-button edit-user" type="button">›</button></div>`).join('')}</div></section>
       <section class="settings-card"><header><div><h2>Balance alerts</h2><p>${balanceChannels.length ? `Notify through ${escapeHtml(balanceChannels.map(channel => channel === 'smtp' ? 'SMTP2GO' : 'ntfy').join(' and '))} when an account crosses a threshold.` : 'Configure SMTP2GO or ntfy in the deployment environment to enable balance alerts.'}</p></div><button class="button button--soft add-balance-alert" type="button" ${balanceChannels.length ? '' : 'disabled'}>+ Add alert</button></header><div class="balance-alert-list">${balanceAlertCards || '<div class="empty-state"><strong>No balance alerts</strong>Add a threshold for any active account and choose where it should be delivered.</div>'}</div></section>
       <section class="settings-card"><header><div><h2>Operational alerts</h2><p>${channelLabels.length ? `Delivery configured through ${escapeHtml(channelLabels.join(' and '))}.` : 'No external alert channel is currently enabled.'}</p></div><button class="button button--soft test-notifications" type="button">Send test</button></header><div class="incident-list">${state.incidents.map(incident => `<div class="incident-row"><div class="incident-top"><div><strong class="${incident.severity === 'critical' ? 'danger' : incident.severity === 'warning' ? 'warning' : ''}">${escapeHtml(incident.title)}</strong><small>${escapeHtml(relativeTime(incident.last_seen_at))} · Seen ${incident.occurrence_count} time${incident.occurrence_count === 1 ? '' : 's'}</small></div>${incident.acknowledged_at ? '<span class="pill">Acknowledged</span>' : `<button class="button button--ghost acknowledge-incident" data-incident-id="${incident.id}" type="button">Acknowledge</button>`}</div><p>${escapeHtml(incident.message)}</p></div>`).join('') || '<div class="empty-state"><strong>No open incidents</strong>Synchronization and background checks have not reported an unresolved problem.</div>'}</div></section>
@@ -3120,6 +3226,8 @@ async function renderMore() {
   $('.sessions-button', $('#app-view')).addEventListener('click', openSessions);
   $('.logout-button', $('#app-view')).addEventListener('click', logout);
   $('.add-connection', $('#app-view'))?.addEventListener('click', openConnectionSetup);
+  $('.move-money-accounts', $('#app-view'))?.addEventListener('click', openTransferEditor);
+  $('.add-account', $('#app-view'))?.addEventListener('click', openAccountCreator);
   $$('.connection-details', $('#app-view')).forEach(button => button.addEventListener('click', () => openConnectionDetails(connections.find(item => item.id === button.closest('.connection-card').dataset.connectionId))));
   $$('.edit-account-name', $('#app-view')).forEach(button => button.addEventListener('click', () => openAccountNameEditor(accountById(button.closest('.connection-card').dataset.accountId))));
   $('.add-user', $('#app-view'))?.addEventListener('click', () => openUserEditor());
@@ -3220,11 +3328,52 @@ function openBalanceAlertEditor(alert = null, availableChannels = []) {
   });
 }
 
+function openAccountCreator() {
+  if (!state.me?.user?.is_admin) { toast('Only the owner can add an account.', 'error'); return; }
+  openModal({
+    title: 'Add a manual account',
+    body: `<form id="account-create-form" class="form-grid">
+      <label class="full">Account name<input id="account-create-name" maxlength="255" placeholder="Cash Safe" autocomplete="off" required></label>
+      <label>Current balance<input id="account-starting-balance" inputmode="decimal" value="0.00" required></label>
+      <label><span><input id="account-create-budget" type="checkbox" style="width:auto;min-height:auto" checked> Include in budget</span></label>
+    </form>`,
+    footer: '<button class="button modal-cancel" type="button">Cancel</button><button class="button button--primary create-account" type="submit" form="account-create-form">Add account</button>',
+    onMount(root) {
+      $('.modal-cancel', root).addEventListener('click', closeModal);
+      const save = async () => {
+        const name = $('#account-create-name', root).value.trim();
+        if (!name) { toast('Enter an account name.', 'error'); $('#account-create-name', root).focus(); return; }
+        let currentBalance;
+        try { currentBalance = unitsToString(toUnits($('#account-starting-balance', root).value)); }
+        catch { toast('Enter a valid current balance.', 'error'); $('#account-starting-balance', root).focus(); return; }
+        const button = $('.create-account', root); setButtonBusy(button, true, 'Adding…');
+        try {
+          await api('/api/accounts', {
+            method: 'POST',
+            body: {
+              name,
+              starting_balance: currentBalance,
+              is_budget: $('#account-create-budget', root).checked,
+            },
+          });
+          state.formDirty = false; closeModal();
+          await refreshCurrentView();
+          toast(`${name} added`, 'default', activeManualAccounts().length >= 2 ? {
+            label: 'Move money',
+            run: () => { openTransferEditor(); return true; },
+          } : null);
+        } catch (error) { toast(error.message, 'error'); } finally { setButtonBusy(button, false); }
+      };
+      $('#account-create-form', root).addEventListener('submit', event => { event.preventDefault(); save(); });
+    },
+  });
+}
+
 function openAccountNameEditor(account) {
   if (!account) { toast('That account is no longer available.', 'error'); return; }
   openModal({
     title: 'Name account',
-    body: `<form id="account-name-form" class="form-grid"><label>Account name<input id="account-display-name" value="${escapeHtml(account.name)}" required maxlength="255" autocomplete="off"></label><p class="muted">This name is used in transactions, rules, and account lists. Bank synchronization will not overwrite it.</p></form>`,
+    body: `<form id="account-name-form" class="form-grid"><label>Account name<input id="account-display-name" value="${escapeHtml(account.name)}" required maxlength="255" autocomplete="off"></label></form>`,
     footer: '<button class="button modal-cancel" type="button">Cancel</button><button class="button button--primary save-account-name" type="button">Save name</button>',
     onMount(root) {
       $('.modal-cancel', root).addEventListener('click', closeModal);

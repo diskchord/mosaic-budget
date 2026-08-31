@@ -222,6 +222,7 @@ def _candidate_query(workspace_id: uuid.UUID):
         .where(
             BudgetTransaction.workspace_id == workspace_id,
             BudgetTransaction.deleted_at.is_(None),
+            BudgetTransaction.transfer_group_id.is_(None),
             BudgetTransaction.account.has(Account.is_duplicate.is_(False)),
         )
         .options(
@@ -246,6 +247,7 @@ def _run_candidate_filters(
         BudgetTransaction.deleted_at.is_(None),
         BudgetTransaction.excluded.is_(False),
         BudgetTransaction.suppressed_by_duplicate_account.is_(False),
+        BudgetTransaction.transfer_group_id.is_(None),
         BudgetTransaction.account.has(Account.is_duplicate.is_(False)),
         not_(BudgetTransaction.allocations.any()),
     )

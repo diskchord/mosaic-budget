@@ -122,6 +122,7 @@ def serialize_transaction(transaction: BudgetTransaction, include_allocations: b
         "version": transaction.version,
         "manual_date_lock": transaction.manual_date_lock,
         "manual_allocation_lock": transaction.manual_allocation_lock,
+        "transfer_group_id": str(transaction.transfer_group_id) if transaction.transfer_group_id else None,
     }
     if include_allocations:
         data["allocations"] = [
@@ -445,6 +446,7 @@ def get_budget_state(db: Session, workspace_id: uuid.UUID, month: date) -> dict[
             BudgetTransaction.excluded.is_(False),
             BudgetTransaction.suppressed_by_duplicate_account.is_(False),
             BudgetTransaction.account.has(Account.is_duplicate.is_(False)),
+            BudgetTransaction.transfer_group_id.is_(None),
             not_(BudgetTransaction.allocations.any()),
         )
         .options(selectinload(BudgetTransaction.account), selectinload(BudgetTransaction.allocations))

@@ -157,6 +157,12 @@ Regular-expression evaluation has a pattern-length limit and execution timeout.
 
 Enabled rules may also be run manually as one ordered ruleset. A manual run is constrained to the selected calendar month and selects only active, non-excluded transactions that have no allocations when the run begins. It never revisits already sorted transactions.
 
+## Manual accounts and paired transfers
+
+The owner may create additional workspace-currency manual accounts with an explicit starting balance. Manual transaction payees are optional at the API boundary; a blank value is stored as a stable cash/manual default so the non-null ledger field and search displays remain useful.
+
+A transfer between two distinct active manual accounts is one atomic operation. Mosaic locks the workspace and both accounts in stable order, subtracts from the source balance, adds to the destination balance, and creates opposite-signed transactions sharing a `transfer_group_id`. Transfer entries remain visible in the transaction ledger but are not unassigned budget work: budget inboxes, rule candidates, and uncategorized analytics omit them. Individual edits that could break the pair are rejected, while deletion and restoration apply to both sides and reverse or reapply both balance changes together.
+
 ## Duplicate imported accounts
 
 The same real bank account can arrive through more than one SimpleFIN connection, so provider identity alone cannot decide which feed a household wants to use. The owner may explicitly mark one imported account as a duplicate.

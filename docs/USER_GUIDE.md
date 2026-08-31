@@ -75,7 +75,11 @@ The group editor can move single-category or unassigned transactions to one cate
 
 ## Add cash or manual activity
 
-Open Transactions and select **Add transaction**. Choose Cash Wallet to maintain a running manual cash balance, or Untracked Cash when only the budget effect matters. Positive amounts are income; negative amounts are expenditure.
+Open **More → Accounts** and select **+ Account** to add another manual cash account, such as Cash Safe. An optional starting balance establishes the amount already in that account without inventing income or expenditure.
+
+Open Transactions and select **Add transaction** to record cash activity. Choose the account, direction, and amount; **Payee or source** is optional. Mosaic stores **Cash transaction** when it is left blank. Positive amounts are income and negative amounts are expenditure.
+
+Select **Move money** to transfer funds between two active manual accounts. Choose the source, destination, positive amount, and date. Mosaic changes both balances and creates a linked withdrawal and deposit in one atomic operation. The pair remains visible in Transactions but is not sent to **To sort**, processed by rules, or counted as income or spending. Deleting or restoring either side applies to the complete pair.
 
 ## Delete and restore
 

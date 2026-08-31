@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from .api import admin, alerts, analytics, auth, budget, connections, events, health, rules, transactions
+from .api import accounts, admin, alerts, analytics, auth, budget, connections, events, health, rules, transactions
 from .config import get_settings
 
 settings = get_settings()
@@ -27,6 +27,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 app.include_router(health.router)
 app.include_router(auth.router)
+app.include_router(accounts.router)
 app.include_router(budget.router)
 app.include_router(transactions.router)
 app.include_router(rules.router)
