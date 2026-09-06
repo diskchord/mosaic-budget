@@ -87,7 +87,7 @@
       <div><small id="tray-target">INBOX</small><h2 id="tray-title">Transactions to sort</h2></div>
       <button id="tray-close" class="icon-button" type="button" aria-label="Close">×</button>
     </header>
-    <p id="tray-help" class="tray-help">Select from the left edge. Drag to a category; touch and hold on mobile.</p>
+    <p id="tray-help" class="sr-only">Use the control at the left to select multiple transactions. Drag a transaction to a category. On a touch screen, press and hold before dragging.</p>
     <div id="tray-selection-bar" class="tray-selection-bar hidden">
       <strong id="tray-selection-count" role="status" aria-live="polite" aria-atomic="true">0 selected</strong>
       <div class="button-row">
@@ -99,8 +99,10 @@
   </aside>
 
   <div id="modal-root" class="modal-root" aria-live="polite"></div>
+  <div id="interaction-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
   <div id="toast-root" class="toast-root" aria-live="polite" aria-atomic="true"></div>
 
+  <script src="/static/money-input.js" defer></script>
   <script src="/static/app.js" defer></script>
 </body>
 </html>

@@ -44,6 +44,8 @@ const state = {
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const MAX_BULK_TRANSACTIONS = 200;
+const moneyInput = window.MoneyInput;
+let assignmentAudioContext = null;
 
 const ICONS = {
   budget: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 19V9M10 19V4M16 19v-7M22 19H2"/></svg>',
@@ -215,13 +217,93 @@ function toast(message, type = 'default', action = null) {
   });
 }
 
+function getAssignmentAudioContext() {
+  const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextConstructor) return null;
+  try {
+    if (!assignmentAudioContext || assignmentAudioContext.state === 'closed') {
+      try { assignmentAudioContext = new AudioContextConstructor({ latencyHint: 'interactive' }); }
+      catch { assignmentAudioContext = new AudioContextConstructor(); }
+    }
+    return assignmentAudioContext;
+  } catch {
+    return null;
+  }
+}
+
+function primeAssignmentAudio() {
+  const context = getAssignmentAudioContext();
+  if (!context || context.state !== 'suspended') return;
+  try { context.resume().catch(() => {}); }
+  catch { /* Audio feedback is optional. */ }
+}
+
+function playAssignmentPop() {
+  if (document.hidden) return;
+  const context = getAssignmentAudioContext();
+  if (!context) return;
+  const play = () => {
+    if (context.state !== 'running') return;
+    try {
+      const start = context.currentTime;
+      const voices = [
+        { type: 'sine', from: 480, to: 240, peak: .085, attack: .003, duration: .11 },
+        { type: 'triangle', from: 960, to: 640, peak: .022, attack: .002, duration: .045 },
+      ];
+      voices.forEach(voice => {
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+        oscillator.type = voice.type;
+        oscillator.frequency.setValueAtTime(voice.from, start);
+        oscillator.frequency.exponentialRampToValueAtTime(voice.to, start + voice.duration * .82);
+        gain.gain.setValueAtTime(.0001, start);
+        gain.gain.exponentialRampToValueAtTime(voice.peak, start + voice.attack);
+        gain.gain.exponentialRampToValueAtTime(.0001, start + voice.duration);
+        oscillator.connect(gain);
+        gain.connect(context.destination);
+        oscillator.addEventListener('ended', () => {
+          try { oscillator.disconnect(); gain.disconnect(); }
+          catch { /* Nodes may already be disconnected. */ }
+        }, { once: true });
+        oscillator.start(start);
+        oscillator.stop(start + voice.duration + .005);
+      });
+    } catch { /* A blocked sound must not turn a saved assignment into an error. */ }
+  };
+  if (context.state === 'running') play();
+  else {
+    try { context.resume().then(play).catch(() => {}); }
+    catch { /* Audio feedback is optional. */ }
+  }
+}
+
+function announceInteraction(message) {
+  const status = $('#interaction-status');
+  if (!status) return;
+  status.textContent = '';
+  requestAnimationFrame(() => { if (status.isConnected) status.textContent = message; });
+}
+
+function animateCategoryAssignment(categoryId) {
+  try {
+    const row = $(`.category-row[data-category-id="${categoryId}"]`, $('#app-view'));
+    if (!row) return;
+    row.classList.remove('assignment-confirmed');
+    void row.offsetWidth;
+    row.classList.add('assignment-confirmed');
+    const clean = () => row.classList.remove('assignment-confirmed');
+    row.addEventListener('animationend', clean, { once: true });
+    setTimeout(clean, 850);
+  } catch { /* Sound and live-region feedback still confirm the assignment. */ }
+}
+
 function setButtonBusy(button, busy, label = 'Working…') {
   if (!button) return;
   if (busy) { button.dataset.original = button.textContent; button.disabled = true; button.textContent = label; }
   else { button.disabled = false; button.textContent = button.dataset.original || button.textContent; }
 }
 
-function openModal({ title, body, footer = '', className = '', returnFocus = null, onMount = null }) {
+function openModal({ title, body, footer = '', className = '', returnFocus = null, initialFocus = null, onMount = null }) {
   state.transactionEditorLoadSequence += 1;
   const focusTarget = returnFocus || document.activeElement;
   if (!state.modalOpen || returnFocus) {
@@ -253,10 +335,11 @@ function openModal({ title, body, footer = '', className = '', returnFocus = nul
   root.addEventListener('change', markFormDirty);
   document.addEventListener('keydown', modalEscape, { once: true });
   hydrateIcons(root);
+  moneyInput.formatAll(root);
   if (onMount) onMount(root);
   const modalBody = $('.modal-body', root);
   setTimeout(() => {
-    if (modalBody?.isConnected) $('input, select, textarea, button', modalBody)?.focus();
+    if (modalBody?.isConnected) (initialFocus ? $(initialFocus, root) : $('input, select, textarea, button', modalBody))?.focus();
   }, 20);
   return root;
 }
@@ -285,17 +368,23 @@ function closeModal() {
   }, 0);
 }
 
-function confirmDialog({ title, message, confirmText = 'Confirm', danger = false, inputLabel = '', expected = '' }) {
+function confirmDialog({ title, message, confirmText = 'Confirm', danger = false, inputLabel = '', expected = '', confirmMoney = false }) {
   return new Promise(resolve => {
     openModal({
       title,
       body: `${danger ? `<div class="delete-warning">${message}</div>` : `<p>${message}</p>`}
-        ${inputLabel ? `<label style="margin-top:14px">${escapeHtml(inputLabel)}<input id="confirm-input" autocomplete="off"></label>` : ''}`,
+        ${inputLabel ? `<label style="margin-top:14px">${escapeHtml(inputLabel)}<input id="confirm-input" ${confirmMoney ? 'data-money-input inputmode="decimal" ' : ''}autocomplete="off"></label>` : ''}`,
       footer: `<button class="button cancel-confirm" type="button">Cancel</button><button class="button ${danger ? 'button--danger' : 'button--primary'} accept-confirm" type="button">${escapeHtml(confirmText)}</button>`,
       onMount(root) {
         $('.cancel-confirm', root).addEventListener('click', () => { closeModal(); resolve(false); });
         $('.accept-confirm', root).addEventListener('click', () => {
-          if (inputLabel && $('#confirm-input', root).value.trim() !== expected) {
+          const confirmationInput = $('#confirm-input', root);
+          let confirmation = confirmationInput?.value.trim() || '';
+          if (confirmMoney) {
+            try { confirmation = moneyInput.read(confirmationInput); }
+            catch (error) { toast(error.message, 'error'); confirmationInput.focus(); return; }
+          }
+          if (inputLabel && confirmation !== expected) {
             toast('The confirmation text does not match.', 'error'); return;
           }
           closeModal(); resolve(true);
@@ -1244,13 +1333,18 @@ function openBudgetAmount(categoryId) {
   if (!found) return;
   openModal({
     title: found.name,
-    body: `<form id="budget-amount-form" class="form-grid"><label>Planned amount for ${escapeHtml(monthLabel(state.month))}<input id="planned-amount" inputmode="decimal" value="${escapeHtml(found.planned)}" required></label>${found.rollover ? '<p class="muted">This is a fund. Its unused balance carries forward.</p>' : ''}</form>`,
+    body: `<form id="budget-amount-form" class="form-grid"><label>Planned amount for ${escapeHtml(monthLabel(state.month))}<input id="planned-amount" data-money-input inputmode="decimal" value="${escapeHtml(found.planned)}" required></label>${found.rollover ? '<p class="muted">This is a fund. Its unused balance carries forward.</p>' : ''}</form>`,
     footer: '<button class="button modal-cancel" type="button">Cancel</button><button class="button button--primary modal-save" type="button">Save amount</button>',
     onMount(root) {
       $('.modal-cancel', root).addEventListener('click', closeModal);
       const save = async () => {
         const button = $('.modal-save', root);
-        const body = { version: found.budget_version, planned: $('#planned-amount', root).value.trim() };
+        const plannedInput = $('#planned-amount', root);
+        let planned;
+        try { planned = moneyInput.read(plannedInput); }
+        catch (error) { toast(error.message, 'error'); plannedInput.focus(); return; }
+        if (!planned) { toast('Enter a planned amount.', 'error'); plannedInput.focus(); return; }
+        const body = { version: found.budget_version, planned };
         setButtonBusy(button, true);
         try {
           const result = await withConflict(
@@ -1532,7 +1626,7 @@ function openCategoryEditor(categoryId = null, sectionId = null) {
       <label>Name<input id="category-name" value="${escapeHtml(found?.name || '')}" maxlength="120" required></label>
       <label>Section<select id="category-section">${state.budget.sections.map(item => `<option value="${item.id}" ${item.id === section.id ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select></label>
       <label>Position<select id="category-position">${positionOptions(section.id)}</select></label>
-      <label>Default monthly plan<input id="category-default" inputmode="decimal" value="${escapeHtml(found?.default_planned || '0')}"></label>
+      <label>Default monthly plan<input id="category-default" data-money-input inputmode="decimal" value="${escapeHtml(found?.default_planned || '0')}"></label>
       <label class="full"><span><input id="category-rollover" type="checkbox" style="width:auto;min-height:auto" ${found?.rollover ? 'checked' : ''} ${section.is_income ? 'disabled' : ''}> Carry unused money forward as a fund</span></label>
       <label>Note<textarea id="category-note">${escapeHtml(found?.note || '')}</textarea></label>
       ${found ? `<div class="availability-summary full"><strong>Month availability</strong><span>${escapeHtml(availabilityDescription(found))}</span></div>` : startMonthMarkup('category')}
@@ -1551,13 +1645,17 @@ function openCategoryEditor(categoryId = null, sectionId = null) {
       $('.remove-category', root)?.addEventListener('click', () => openStructureRemoval('category', found));
       $('.delete-category', root)?.addEventListener('click', () => deleteStructure('category', found));
       const save = async () => {
+        const defaultInput = $('#category-default', root);
+        let defaultPlanned;
+        try { defaultPlanned = moneyInput.read(defaultInput, { blankAsZero: true }); }
+        catch (error) { toast(error.message, 'error'); defaultInput.focus(); return; }
         const button = $('.modal-save', root); setButtonBusy(button, true);
         const body = {
           section_id: $('#category-section', root).value,
           name: $('#category-name', root).value.trim(),
           sort_order: Number($('#category-position', root).value),
           rollover: $('#category-rollover', root).checked,
-          default_planned: $('#category-default', root).value.trim() || '0',
+          default_planned: defaultPlanned,
           note: $('#category-note', root).value,
         };
         try {
@@ -1653,7 +1751,6 @@ function renderTray() {
   if (!container || !state.budget) return;
   $('#tray-title').textContent = 'Transactions to sort';
   $('#tray-target').textContent = `ASSIGN TO ${monthLabel(state.month).toLocaleUpperCase()}`;
-  $('#tray-help').textContent = `Drop into a category to assign it to ${monthLabel(state.month)}. Select from the left edge; touch and hold on mobile.`;
   const focusedBubble = document.activeElement?.closest?.('.tx-bubble');
   const focusedId = focusedBubble?.dataset.transactionId || null;
   const focusedControl = document.activeElement?.classList.contains('tx-select') ? 'select' : 'content';
@@ -1730,42 +1827,6 @@ function closeTray({ restoreFocus = true } = {}) {
   if (restoreFocus && !$('#inbox-button').classList.contains('hidden')) $('#inbox-button').focus({ preventScroll: true });
 }
 
-async function undoTransactionAssignment(transactions, undoToken) {
-  if (!transactions.length || !undoToken || state.assignmentInFlight) return false;
-  state.assignmentInFlight = true;
-  try {
-    const result = await api('/api/transactions/batch', {
-      method: 'PUT',
-      body: {
-        category_id: null,
-        transactions: transactions.map(transaction => ({ id: transaction.id, version: transaction.version })),
-        undo_token: undoToken,
-      },
-    });
-    const refreshed = await refreshCurrentView();
-    if (!refreshed && state.budget) {
-      const restored = result.transactions || [];
-      const restoredIds = new Set(restored.map(transaction => transaction.id));
-      state.budget.unassigned = [
-        ...restored,
-        ...(state.budget.unassigned || []).filter(transaction => !restoredIds.has(transaction.id)),
-      ];
-      renderTray();
-      updateNavigation();
-    }
-    const message = transactions.length === 1 ? 'Assignment undone' : `${transactions.length} assignments undone`;
-    toast(refreshed ? message : `${message}. Reload to refresh budget totals.`);
-    return true;
-  } catch (error) {
-    if (error.status !== 401) toast(`Could not undo: ${error.message}`, 'error');
-    if (error instanceof ConflictError) await refreshCurrentView();
-    return false;
-  } finally {
-    state.assignmentInFlight = false;
-    syncBubbleSelection();
-  }
-}
-
 async function assignTransactions(transactionIds, categoryId, { keepTrayOpen = false } = {}) {
   if (state.assignmentInFlight) return false;
   const transactions = transactionIds.map(transactionById);
@@ -1774,6 +1835,7 @@ async function assignTransactions(transactionIds, categoryId, { keepTrayOpen = f
     toast('Those transactions are no longer available to assign.', 'error');
     return false;
   }
+  primeAssignmentAudio();
   state.assignmentInFlight = true;
   const targetMonth = state.month;
   $('#transaction-tray')?.setAttribute('aria-busy', 'true');
@@ -1787,6 +1849,7 @@ async function assignTransactions(transactionIds, categoryId, { keepTrayOpen = f
         transactions: transactions.map(transaction => ({ id: transaction.id, version: transaction.version })),
       },
     });
+    playAssignmentPop();
     if (!keepTrayOpen) closeTray({ restoreFocus: false });
     const message = transactions.length === 1
       ? `${transactionLabel(transactions[0])} moved to ${category.name} in ${monthLabel(targetMonth)}`
@@ -1801,21 +1864,12 @@ async function assignTransactions(transactionIds, categoryId, { keepTrayOpen = f
       renderTray();
       updateNavigation();
     }
-    const assignedRow = $(`.category-row[data-category-id="${category.id}"]`, $('#app-view'));
-    if (assignedRow) {
-      assignedRow.classList.add('assignment-confirmed');
-      setTimeout(() => assignedRow.classList.remove('assignment-confirmed'), 1500);
-    }
+    animateCategoryAssignment(category.id);
+    announceInteraction(message);
     if (!keepTrayOpen) $('#app-view')?.focus({ preventScroll: true });
     state.assignmentInFlight = false;
     $('#transaction-tray')?.removeAttribute('aria-busy');
     syncBubbleSelection();
-    const confirmation = refreshed ? message : `${message}. Reload to refresh budget totals.`;
-    const undoAction = result.undo_token ? {
-      label: 'Undo',
-      run: () => undoTransactionAssignment(result.transactions || [], result.undo_token),
-    } : null;
-    toast(confirmation, 'default', undoAction);
     return true;
   } catch (error) {
     if (error.status !== 401) toast(error.message, 'error');
@@ -1952,6 +2006,7 @@ function installBubbleDrag() {
     const transactionIds = state.selectedTransactionIds.has(sourceId) ? selectedTrayTransactionIds() : [sourceId];
     const transactions = transactionIds.map(transactionById).filter(Boolean);
     if (!transactions.length || transactions.length !== transactionIds.length) { clean(); return; }
+    document.getSelection?.()?.removeAllRanges();
     drag.active = true;
     drag.transactionIds = transactionIds;
     drag.bubble.dataset.dragged = 'true';
@@ -1984,6 +2039,7 @@ function installBubbleDrag() {
   };
 
   const startDrag = ({ bubble, handle, x, y, pointerId = null, touchId = null }) => {
+    primeAssignmentAudio();
     state.cancelReorderDrag?.();
     clean();
     state.transactionEditorLoadSequence += 1;
@@ -2135,8 +2191,11 @@ function installBubbleDrag() {
     finish(touch.clientX, touch.clientY);
   }, { passive: false });
   container.addEventListener('touchcancel', clean);
+  container.addEventListener('selectstart', event => {
+    if (event.target.closest('.tx-bubble')) event.preventDefault();
+  });
   container.addEventListener('contextmenu', event => {
-    if (drag?.active && event.target.closest('.tx-bubble')) event.preventDefault();
+    if (drag && drag.touchId !== null && event.target.closest('.tx-bubble')) event.preventDefault();
   });
   window.addEventListener('blur', clean);
   document.addEventListener('visibilitychange', () => { if (document.hidden) clean(); });
@@ -2381,7 +2440,7 @@ function openBulkTransactionEditor() {
 }
 
 function signedInputForTransaction(transaction, raw) {
-  const absolute = raw.trim();
+  const absolute = moneyInput.format(raw);
   if (!absolute) return '0';
   const units = toUnits(absolute);
   const transactionUnits = toUnits(transaction.amount);
@@ -2405,7 +2464,7 @@ function allocationEditorRow(transaction, allocation, split, index = 0) {
   const splitNumber = index + 1;
   return `<div class="split-row ${split ? '' : 'single-allocation-row'}">
     <select class="allocation-category" aria-label="${split ? `Category for split ${splitNumber}` : 'Category'}">${allocationCategoryOptions(categoryId, split)}</select>
-    ${split ? `<input class="allocation-amount" inputmode="decimal" aria-label="Amount for split ${splitNumber}" placeholder="Amount" value="${escapeHtml(amount)}">
+    ${split ? `<input class="allocation-amount" data-money-input inputmode="decimal" aria-label="Amount for split ${splitNumber}" placeholder="0.00" value="${escapeHtml(amount)}">
     <button class="icon-button remove-allocation" type="button" aria-label="Remove split ${splitNumber}">×</button>` : ''}
   </div>`;
 }
@@ -2454,6 +2513,7 @@ function renderAllocationRows(root, transaction, drafts, { focusIndex = null, re
   editor.dataset.allocationMode = split ? 'split' : 'single';
   $('.allocation-title', editor).textContent = split ? 'Split categories' : 'Category';
   table.innerHTML = normalized.map((allocation, index) => allocationEditorRow(transaction, allocation, split, index)).join('');
+  moneyInput.formatAll(table);
   $('.split-summary', editor).classList.toggle('hidden', !split);
   $('.assign-remainder', editor).classList.toggle('hidden', !split);
   $$('input,select', table).forEach(control => {
@@ -2560,7 +2620,7 @@ function bindAllocationRows(root, transaction) {
       return;
     }
     targetInput.removeAttribute('aria-invalid');
-    targetInput.value = unitsToString(remainder < 0n ? -remainder : remainder);
+    targetInput.value = moneyInput.format(unitsToString(remainder < 0n ? -remainder : remainder));
     allocationTotals(root, transaction); state.formDirty = true;
   });
 }
@@ -2588,6 +2648,7 @@ async function openTransactionEditor(transactionId, {
     title: deleted ? (transfer ? 'Transfer in Trash' : 'Transaction in Trash') : (transfer ? 'Transfer details' : 'Transaction details'),
     className: 'modal--wide',
     returnFocus,
+    initialFocus: '.modal-close',
     body: `<div class="transaction-hero">
       <div><h3>${escapeHtml(transactionLabel(transaction))}</h3><p>${escapeHtml(transaction.account_name)} · ${escapeHtml(formatDate(transaction.effective_date))}${transaction.pending ? ' · Pending' : ''}</p></div>
       <div class="hero-amount ${inflow ? 'positive' : ''}">${money(transaction.amount, { plus: true })}</div>
@@ -2631,14 +2692,14 @@ async function openTransactionEditor(transactionId, {
         return;
       }
       $('.delete-transaction', root).addEventListener('click', async () => {
-        const expected = unitsToString(toUnits(transaction.amount) < 0n ? -toUnits(transaction.amount) : toUnits(transaction.amount));
+        const expected = moneyInput.format(unitsToString(toUnits(transaction.amount) < 0n ? -toUnits(transaction.amount) : toUnits(transaction.amount)));
         const accepted = await confirmDialog({
           title: transfer ? 'Delete this transfer?' : 'Delete this transaction?',
           message: transfer
             ? 'Both linked entries will move to Trash and both manual account balances will be reversed.'
             : 'It will leave all budget totals and move to Trash. A synced transaction keeps a minimal tombstone so the next import cannot bring it back.',
           confirmText: transfer ? 'Delete transfer' : 'Delete transaction', danger: true,
-          inputLabel: `Type the amount ${expected} to confirm`, expected,
+          inputLabel: `Type the amount ${expected} to confirm`, expected, confirmMoney: true,
         });
         if (!accepted) return;
         try {
@@ -2698,7 +2759,7 @@ function openTransferEditor() {
     body: `<form id="transfer-form" class="form-grid">
       <label>From account<select id="transfer-from">${accountOptionsFor(accounts, defaultFrom.id)}</select></label>
       <label>To account<select id="transfer-to">${accountOptionsFor(accounts, defaultTo.id)}</select></label>
-      <label>Amount<input id="transfer-amount" inputmode="decimal" placeholder="0.00" required></label>
+      <label>Amount<input id="transfer-amount" data-money-input inputmode="decimal" placeholder="0.00" required></label>
       <label>Date<input id="transfer-date" type="date" value="${defaultTransactionDate()}" required></label>
       <label class="full">Note (optional)<textarea id="transfer-note" maxlength="10000"></textarea></label>
     </form>`,
@@ -2720,7 +2781,7 @@ function openTransferEditor() {
         const toAccountId = toSelect.value;
         if (fromAccountId === toAccountId) { toast('Choose two different accounts.', 'error'); toSelect.focus(); return; }
         let amount;
-        try { amount = toUnits($('#transfer-amount', root).value); }
+        try { amount = toUnits(moneyInput.read($('#transfer-amount', root))); }
         catch { toast('Enter a valid amount.', 'error'); $('#transfer-amount', root).focus(); return; }
         if (amount <= 0n) { toast('Enter a positive amount.', 'error'); $('#transfer-amount', root).focus(); return; }
         const button = $('.create-transfer', root); setButtonBusy(button, true, 'Moving…');
@@ -2754,7 +2815,7 @@ function openManualTransaction() {
     title: 'Add a cash or manual transaction',
     body: `<form id="manual-form" class="form-grid">
       <label>Type<select id="manual-direction"><option value="outflow">Expense</option><option value="inflow">Income</option></select></label>
-      <label>Amount<input id="manual-amount" inputmode="decimal" placeholder="0.00" required></label>
+      <label>Amount<input id="manual-amount" data-money-input inputmode="decimal" placeholder="0.00" required></label>
       <label>Payee or source (optional)<input id="manual-payee" maxlength="500" placeholder="Cash transaction"></label>
       <label>Date<input id="manual-date" type="date" value="${defaultTransactionDate()}" required></label>
       <label>Account<select id="manual-account">${state.budget.accounts.map(account => `<option value="${account.id}" ${account.id === defaultAccount.id ? 'selected' : ''}>${escapeHtml(account.name)}</option>`).join('')}</select></label>
@@ -2767,7 +2828,7 @@ function openManualTransaction() {
       const save = async () => {
         const button = $('.create-manual', root); setButtonBusy(button, true, 'Adding…');
         try {
-          let amount = toUnits($('#manual-amount', root).value);
+          let amount = toUnits(moneyInput.read($('#manual-amount', root)));
           if (amount < 0n) amount = -amount;
           if (amount === 0n) throw new Error('Enter a non-zero amount.');
           if ($('#manual-direction', root).value === 'outflow') amount = -amount;
@@ -2920,6 +2981,7 @@ function defaultRuleActions(rule, transaction) {
 function conditionValueMarkup(condition) {
   const field = condition.field;
   const operator = condition.operator;
+  const isMoneyField = ['amount', 'outflow', 'inflow'].includes(field);
   if (['is_true','is_false'].includes(operator)) return '<span class="condition-value muted">No additional value</span>';
   if (field === 'account_id') {
     const accounts = accountCatalog();
@@ -2937,12 +2999,14 @@ function conditionValueMarkup(condition) {
   const inputType = isDate ? 'date' : 'text';
   if (operator === 'between') {
     const values = Array.isArray(condition.value) ? condition.value : ['', ''];
-    return `<div class="condition-value form-grid"><label>From<input class="condition-low" type="${inputType}" inputmode="${['amount','outflow','inflow','day_of_month','month'].includes(field) ? 'decimal' : 'text'}" value="${escapeHtml(values[0] ?? '')}"></label><label>Through<input class="condition-high" type="${inputType}" inputmode="${['amount','outflow','inflow','day_of_month','month'].includes(field) ? 'decimal' : 'text'}" value="${escapeHtml(values[1] ?? '')}"></label></div>`;
+    const decimalInput = isMoneyField || ['day_of_month', 'month'].includes(field);
+    const moneyAttribute = isMoneyField ? ' data-money-input' : '';
+    return `<div class="condition-value form-grid"><label>From<input class="condition-low" type="${inputType}"${moneyAttribute} inputmode="${decimalInput ? 'decimal' : 'text'}" value="${escapeHtml(values[0] ?? '')}"></label><label>Through<input class="condition-high" type="${inputType}"${moneyAttribute} inputmode="${decimalInput ? 'decimal' : 'text'}" value="${escapeHtml(values[1] ?? '')}"></label></div>`;
   }
   if (field === 'source') return `<label class="condition-value">Value<select class="condition-value-input"><option value="simplefin" ${condition.value === 'simplefin' ? 'selected' : ''}>SimpleFIN</option><option value="manual" ${condition.value === 'manual' ? 'selected' : ''}>Manual or cash</option></select></label>`;
   if (field === 'day_of_week' && !['one_of','not_one_of'].includes(operator)) return `<label class="condition-value">Day<select class="condition-value-input">${['monday','tuesday','wednesday','thursday','friday','saturday','sunday'].map(day => `<option value="${day}" ${condition.value === day ? 'selected' : ''}>${day[0].toUpperCase()+day.slice(1)}</option>`).join('')}</select></label>`;
   const listHint = ['one_of','not_one_of'].includes(operator) ? 'Comma-separated values' : 'Value';
-  return `<label class="condition-value">${listHint}<input class="condition-value-input" type="${inputType}" value="${escapeHtml(Array.isArray(condition.value) ? condition.value.join(', ') : condition.value ?? '')}"></label>`;
+  return `<label class="condition-value">${listHint}<input class="condition-value-input" type="${inputType}"${isMoneyField ? ' data-money-input inputmode="decimal"' : ''} value="${escapeHtml(Array.isArray(condition.value) ? condition.value.join(', ') : condition.value ?? '')}"></label>`;
 }
 
 function conditionRowMarkup(condition) {
@@ -2959,7 +3023,7 @@ function conditionRowMarkup(condition) {
 function splitPartsMarkup(action) {
   const metric = action.type === 'split_percent' ? 'percent' : 'amount';
   const parts = action.splits?.length ? action.splits : [{ category_id: '', [metric]: '' }];
-  return `<div class="split-parts">${parts.map(part => `<div class="split-part"><select class="split-category">${categoryOptions(part.category_id, true)}</select><input class="split-value" inputmode="decimal" placeholder="${metric === 'percent' ? '%' : 'Amount'}" value="${escapeHtml(part[metric] ?? '')}"><button class="icon-button remove-split-part" type="button">×</button></div>`).join('')}<button class="button button--ghost add-split-part" type="button">+ Add part</button><label>Remainder category<select class="remainder-category"><option value="">None</option>${categoryOptions(action.remainder_category_id || '', true)}</select></label></div>`;
+  return `<div class="split-parts">${parts.map(part => `<div class="split-part"><select class="split-category">${categoryOptions(part.category_id, true)}</select><input class="split-value" ${metric === 'amount' ? 'data-money-input ' : ''}inputmode="decimal" aria-label="${metric === 'percent' ? 'Split percentage' : 'Fixed split amount'}" placeholder="${metric === 'percent' ? '%' : '0.00'}" value="${escapeHtml(part[metric] ?? '')}"><button class="icon-button remove-split-part" type="button">×</button></div>`).join('')}<button class="button button--ghost add-split-part" type="button">+ Add part</button><label>Remainder category<select class="remainder-category"><option value="">None</option>${categoryOptions(action.remainder_category_id || '', true)}</select></label></div>`;
 }
 
 function actionValueMarkup(action) {
@@ -2985,12 +3049,15 @@ function actionRowMarkup(action) {
 function readConditionRow(row) {
   const field = $('.condition-field', row).value;
   const operator = $('.condition-operator', row).value;
+  const isMoneyField = ['amount', 'outflow', 'inflow'].includes(field);
   let value = null;
   if (!['is_true','is_false'].includes(operator)) {
-    if (operator === 'between') value = [$('.condition-low', row).value.trim(), $('.condition-high', row).value.trim()];
+    if (operator === 'between') value = isMoneyField
+      ? [moneyInput.read($('.condition-low', row)), moneyInput.read($('.condition-high', row))]
+      : [$('.condition-low', row).value.trim(), $('.condition-high', row).value.trim()];
     else if (field === 'account_id' && ['one_of','not_one_of'].includes(operator)) value = [...$('.condition-value-input', row).selectedOptions].map(option => option.value);
     else {
-      value = $('.condition-value-input', row).value.trim();
+      value = isMoneyField ? moneyInput.read($('.condition-value-input', row)) : $('.condition-value-input', row).value.trim();
       if (['one_of','not_one_of'].includes(operator)) value = value.split(',').map(item => item.trim()).filter(Boolean);
     }
   }
@@ -3006,7 +3073,11 @@ function readActionRow(row) {
     const metric = type === 'split_percent' ? 'percent' : 'amount';
     return {
       type,
-      splits: $$('.split-part', row).map(part => ({ category_id: $('.split-category', part).value, [metric]: $('.split-value', part).value.trim(), memo: '' })),
+      splits: $$('.split-part', row).map(part => ({
+        category_id: $('.split-category', part).value,
+        [metric]: metric === 'amount' ? moneyInput.read($('.split-value', part)) : $('.split-value', part).value.trim(),
+        memo: '',
+      })),
       remainder_category_id: $('.remainder-category', row).value || null,
     };
   }
@@ -3014,8 +3085,32 @@ function readActionRow(row) {
 }
 
 function bindConditionRow(row) {
+  moneyInput.formatAll(row);
+  const operatorInput = $('.condition-operator', row);
+  const previousOperator = operatorInput.value;
   const rebuild = () => {
-    const condition = readConditionRow(row);
+    const nextOperator = operatorInput.value;
+    operatorInput.value = previousOperator;
+    let condition;
+    try { condition = readConditionRow(row); }
+    catch {
+      const invalidInput = $('[data-money-input]:invalid', row) || $('[data-money-input]', row);
+      invalidInput?.reportValidity();
+      invalidInput?.focus();
+      return;
+    }
+    condition.operator = nextOperator;
+    const previousIsList = ['one_of', 'not_one_of'].includes(previousOperator);
+    const nextIsList = ['one_of', 'not_one_of'].includes(nextOperator);
+    if (nextOperator === 'between' && previousOperator !== 'between') {
+      condition.value = [Array.isArray(condition.value) ? condition.value[0] || '' : condition.value || '', ''];
+    } else if (previousOperator === 'between' && nextOperator !== 'between') {
+      condition.value = Array.isArray(condition.value) ? condition.value[0] || '' : condition.value || '';
+    } else if (nextIsList && !previousIsList) {
+      condition.value = condition.value ? [condition.value] : [];
+    } else if (previousIsList && !nextIsList) {
+      condition.value = Array.isArray(condition.value) ? condition.value[0] || '' : condition.value || '';
+    }
     const replacement = document.createElement('div');
     replacement.innerHTML = conditionRowMarkup(condition);
     const next = replacement.firstElementChild;
@@ -3028,12 +3123,13 @@ function bindConditionRow(row) {
     const replacement = document.createElement('div'); replacement.innerHTML = conditionRowMarkup({ field, operator: operators[0], value: '' });
     const next = replacement.firstElementChild; row.replaceWith(next); bindConditionRow(next); state.formDirty = true;
   });
-  $('.condition-operator', row).addEventListener('change', rebuild);
+  operatorInput.addEventListener('change', rebuild);
   $('.remove-condition', row).addEventListener('click', () => { row.remove(); state.formDirty = true; });
   $$('input,select', row).forEach(input => input.addEventListener('input', () => { state.formDirty = true; }));
 }
 
 function bindActionRow(row) {
+  moneyInput.formatAll(row);
   const typeSelect = $('.action-type', row);
   typeSelect.addEventListener('change', () => {
     const replacement = document.createElement('div'); replacement.innerHTML = actionRowMarkup({ type: typeSelect.value });
@@ -3046,7 +3142,7 @@ function bindActionRow(row) {
     const actionType = $('.action-type', row).value;
     const metric = actionType === 'split_percent' ? '%' : 'Amount';
     const part = document.createElement('div'); part.className = 'split-part';
-    part.innerHTML = `<select class="split-category">${categoryOptions('', true)}</select><input class="split-value" inputmode="decimal" placeholder="${metric}"><button class="icon-button remove-split-part" type="button">×</button>`;
+    part.innerHTML = `<select class="split-category">${categoryOptions('', true)}</select><input class="split-value" ${actionType === 'split_fixed' ? 'data-money-input ' : ''}inputmode="decimal" aria-label="${actionType === 'split_fixed' ? 'Fixed split amount' : 'Split percentage'}" placeholder="${actionType === 'split_fixed' ? '0.00' : metric}"><button class="icon-button remove-split-part" type="button">×</button>`;
     $('.add-split-part', row).before(part); bindPart(part); state.formDirty = true;
   });
   $$('input,select', row).forEach(input => input.addEventListener('input', () => { state.formDirty = true; }));
@@ -3189,13 +3285,7 @@ async function renderMore() {
     return `<div class="connection-card balance-alert-card ${alert.triggered ? 'balance-alert-card--triggered' : ''} ${!alert.available ? 'balance-alert-card--unavailable' : ''}" data-alert-id="${alert.id}"><div class="connection-top"><div><strong>${escapeHtml(alert.name)}</strong><small>${escapeHtml(alert.account_name)} · ${condition} ${money(alert.threshold)} · ${escapeHtml(balance)} · ${escapeHtml(delivery)}${escapeHtml(availability)}${escapeHtml(deliveryAvailability)}</small></div><div class="account-card-actions"><span class="pill ${statusClass}">${status}</span><button class="icon-button edit-balance-alert" type="button" aria-label="Edit ${escapeHtml(alert.name)}"><span data-icon="pencil"></span></button></div></div></div>`;
   }).join('');
   const allAccounts = accountCatalog();
-  const duplicateAccountCount = allAccounts.filter(account => account.is_duplicate).length;
-  const inactiveAccountCount = allAccounts.filter(account => !account.is_duplicate && !account.is_active).length;
-  const hiddenAccountCount = duplicateAccountCount + inactiveAccountCount;
-  const hiddenAccountSummary = [
-    duplicateAccountCount ? `${duplicateAccountCount} duplicate` : '',
-    inactiveAccountCount ? `${inactiveAccountCount} inactive` : '',
-  ].filter(Boolean).join(' · ');
+  const hiddenAccountCount = allAccounts.filter(account => account.is_duplicate || !account.is_active).length;
   const canMoveMoney = activeManualAccounts().length >= 2;
   const accountCards = allAccounts.filter(account => account.is_active && !account.is_duplicate).map(account => {
     const status = account.is_budget ? 'On budget' : 'Off budget';
@@ -3204,20 +3294,20 @@ async function renderMore() {
   const emptyAccounts = hiddenAccountCount
     ? `<div class="empty-state"><strong>No accounts to show</strong>${hiddenAccountCount} account${hiddenAccountCount === 1 ? ' is' : 's are'} inactive or duplicate and hidden from this list.</div>`
     : `<div class="empty-state"><strong>No accounts yet</strong>${admin ? 'Add a manual account or connect a bank.' : 'Ask the owner to add a manual account or connect a bank.'}</div>`;
-  $('#app-view').innerHTML = `<header class="view-header"><div><h1>More</h1><p>Appearance, bank connections, people, and system reliability.</p></div></header>
+  $('#app-view').innerHTML = `<header class="view-header"><div><h1>More</h1></div></header>
     <div class="settings-grid">
       <section class="settings-card"><header><div><h2>${escapeHtml(state.me.user.display_name)}</h2><p>${escapeHtml(state.me.user.email)}${admin ? ' · Owner' : ''}</p></div><span class="avatar-button profile-avatar" aria-hidden="true">${escapeHtml(initials(state.me.user.display_name))}</span></header><div class="button-row"><button class="button button--soft sessions-button" type="button">Signed-in devices</button><button class="button logout-button" type="button">Sign out</button></div></section>
-      <section class="settings-card"><header><div><h2>Your theme</h2><p>Appearance is saved independently for each user.</p></div></header><div class="theme-grid">${themes.map(theme => { const meta = THEME_META[theme] || { label: theme, colors: [] }; return `<button class="theme-choice ${state.me.user.theme === theme ? 'active' : ''}" data-theme-choice="${theme}" type="button"><span class="theme-swatches">${meta.colors.map(color => `<i style="--swatch:${color}"></i>`).join('')}</span><strong>${escapeHtml(meta.label)}</strong></button>`; }).join('')}</div>
+      <section class="settings-card"><header><div><h2>Your theme</h2></div></header><div class="theme-grid">${themes.map(theme => { const meta = THEME_META[theme] || { label: theme, colors: [] }; return `<button class="theme-choice ${state.me.user.theme === theme ? 'active' : ''}" data-theme-choice="${theme}" type="button"><span class="theme-swatches">${meta.colors.map(color => `<i style="--swatch:${color}"></i>`).join('')}</span><strong>${escapeHtml(meta.label)}</strong></button>`; }).join('')}</div>
         <div class="form-grid" style="margin-top:13px"><label>Layout density<select id="preference-density"><option value="comfortable" ${state.me.user.preferences?.density !== 'compact' ? 'selected' : ''}>Comfortable</option><option value="compact" ${state.me.user.preferences?.density === 'compact' ? 'selected' : ''}>Compact</option></select></label><label>Motion<select id="preference-motion"><option value="full" ${state.me.user.preferences?.motion !== 'reduced' ? 'selected' : ''}>Full</option><option value="reduced" ${state.me.user.preferences?.motion === 'reduced' ? 'selected' : ''}>Reduced</option></select></label></div>
       </section>
-      <section class="settings-card"><header><h2>Bank connections</h2>${admin ? '<button class="button button--primary add-connection" type="button">+ Connect</button>' : ''}</header>
+      <section class="settings-card"><header><div class="settings-card-heading"><h2>Bank connections</h2></div>${admin ? '<div class="settings-card-actions"><button class="button button--primary add-connection" type="button">+ Connect</button></div>' : ''}</header>
         <div class="connection-list">${connections.map(connection => `<div class="connection-card" data-connection-id="${connection.id}"><div class="connection-top"><div><strong>${escapeHtml(connection.name)}</strong><small>Every ${connection.sync_interval_minutes / 60} hours · Next ${escapeHtml(relativeTime(connection.next_sync_at))}</small></div><button class="icon-button connection-details" type="button">›</button></div><div class="health-line"><span class="status-dot"></span>${connectionHealthMarkup(connection)}</div>${connection.last_error_message ? `<p class="danger">${escapeHtml(connection.last_error_message)}</p>` : ''}</div>`).join('') || '<div class="empty-state"><strong>No bank connected</strong>Manual and cash budgeting still work. The owner can add SimpleFIN here.</div>'}</div>
       </section>
-      <section class="settings-card"><header><div><h2>Accounts</h2>${hiddenAccountSummary ? `<p>Hidden: ${escapeHtml(hiddenAccountSummary)}</p>` : ''}</div><div class="button-row"><button class="button button--soft move-money-accounts" type="button" ${canMoveMoney ? '' : 'disabled title="Add two active manual accounts to move money"'}>Move money</button>${admin ? '<button class="button button--primary add-account" type="button">+ Account</button>' : ''}</div></header>${accountCards || emptyAccounts}</section>
-      ${admin ? `<section class="settings-card"><header><div><h2>People</h2><p>Multiple devices can be active at once. Conflicting edits require an explicit choice.</p></div><button class="button button--soft add-user" type="button">+ User</button></header><div class="user-list">${state.users.map(user => `<div class="user-row" data-user-id="${user.id}"><div><strong>${escapeHtml(user.display_name)} ${user.is_admin ? '<span class="pill">Owner</span>' : ''}</strong><small>${escapeHtml(user.email)} · ${user.is_active ? 'Active' : 'Disabled'}</small></div><button class="icon-button edit-user" type="button">›</button></div>`).join('')}</div></section>
-      <section class="settings-card"><header><div><h2>Balance alerts</h2><p>${balanceChannels.length ? `Notify through ${escapeHtml(balanceChannels.map(channel => channel === 'smtp' ? 'SMTP2GO' : 'ntfy').join(' and '))} when an account crosses a threshold.` : 'Configure SMTP2GO or ntfy in the deployment environment to enable balance alerts.'}</p></div><button class="button button--soft add-balance-alert" type="button" ${balanceChannels.length ? '' : 'disabled'}>+ Add alert</button></header><div class="balance-alert-list">${balanceAlertCards || '<div class="empty-state"><strong>No balance alerts</strong>Add a threshold for any active account and choose where it should be delivered.</div>'}</div></section>
-      <section class="settings-card"><header><div><h2>Operational alerts</h2><p>${channelLabels.length ? `Delivery configured through ${escapeHtml(channelLabels.join(' and '))}.` : 'No external alert channel is currently enabled.'}</p></div><button class="button button--soft test-notifications" type="button">Send test</button></header><div class="incident-list">${state.incidents.map(incident => `<div class="incident-row"><div class="incident-top"><div><strong class="${incident.severity === 'critical' ? 'danger' : incident.severity === 'warning' ? 'warning' : ''}">${escapeHtml(incident.title)}</strong><small>${escapeHtml(relativeTime(incident.last_seen_at))} · Seen ${incident.occurrence_count} time${incident.occurrence_count === 1 ? '' : 's'}</small></div>${incident.acknowledged_at ? '<span class="pill">Acknowledged</span>' : `<button class="button button--ghost acknowledge-incident" data-incident-id="${incident.id}" type="button">Acknowledge</button>`}</div><p>${escapeHtml(incident.message)}</p></div>`).join('') || '<div class="empty-state"><strong>No open incidents</strong>Synchronization and background checks have not reported an unresolved problem.</div>'}</div></section>
-      <section class="settings-card"><header><div><h2>Reliability</h2><p>Worker, synchronization, and verified backup status.</p></div></header><div class="health-line"><span class="status-dot"></span><strong>${system.healthy ? 'All monitored systems healthy' : 'Attention required'}</strong></div><div class="health-line">Worker: ${state.operations.worker.healthy ? 'healthy' : 'stale'} · heartbeat ${escapeHtml(relativeTime(state.operations.worker.heartbeat_at))}</div><div class="health-line">Backup: ${state.operations.backup.verified_at ? `verified ${escapeHtml(relativeTime(state.operations.backup.verified_at))}` : 'not yet verified'}</div><div class="health-line">Sync: ${escapeHtml(system.synchronization)} · Backup: ${escapeHtml(system.backup)}</div></section>` : ''}
+      <section class="settings-card"><header><div class="settings-card-heading"><h2>Accounts</h2></div><div class="settings-card-actions settings-card-actions--group"><button class="button button--soft move-money-accounts" type="button" ${canMoveMoney ? '' : 'disabled title="Add two active manual accounts to move money"'}>Move money</button>${admin ? '<button class="button button--primary add-account" type="button">+ Account</button>' : ''}</div></header>${accountCards || emptyAccounts}</section>
+      ${admin ? `<section class="settings-card"><header><div class="settings-card-heading"><h2>People</h2></div><div class="settings-card-actions"><button class="button button--soft add-user" type="button">+ User</button></div></header><div class="user-list">${state.users.map(user => `<div class="user-row" data-user-id="${user.id}"><div><strong>${escapeHtml(user.display_name)} ${user.is_admin ? '<span class="pill">Owner</span>' : ''}</strong><small>${escapeHtml(user.email)} · ${user.is_active ? 'Active' : 'Disabled'}</small></div><button class="icon-button edit-user" type="button">›</button></div>`).join('')}</div></section>
+      <section class="settings-card"><header><div class="settings-card-heading"><h2>Balance alerts</h2>${balanceChannels.length ? '' : '<p>No delivery channel</p>'}</div><div class="settings-card-actions"><button class="button button--soft add-balance-alert" type="button" ${balanceChannels.length ? '' : 'disabled title="Configure SMTP2GO or ntfy to add alerts"'}>+ Alert</button></div></header><div class="balance-alert-list">${balanceAlertCards || '<div class="empty-state"><strong>No balance alerts</strong></div>'}</div></section>
+      <section class="settings-card"><header><div class="settings-card-heading"><h2>Operational alerts</h2><p>${channelLabels.length ? escapeHtml(channelLabels.join(' · ')) : 'No delivery channel'}</p></div><div class="settings-card-actions"><button class="button button--soft test-notifications" type="button">Send test</button></div></header><div class="incident-list">${state.incidents.map(incident => `<div class="incident-row"><div class="incident-top"><div><strong class="${incident.severity === 'critical' ? 'danger' : incident.severity === 'warning' ? 'warning' : ''}">${escapeHtml(incident.title)}</strong><small>${escapeHtml(relativeTime(incident.last_seen_at))} · Seen ${incident.occurrence_count} time${incident.occurrence_count === 1 ? '' : 's'}</small></div>${incident.acknowledged_at ? '<span class="pill">Acknowledged</span>' : `<button class="button button--ghost acknowledge-incident" data-incident-id="${incident.id}" type="button">Acknowledge</button>`}</div><p>${escapeHtml(incident.message)}</p></div>`).join('') || '<div class="empty-state"><strong>No open incidents</strong>Synchronization and background checks have not reported an unresolved problem.</div>'}</div></section>
+      <section class="settings-card"><header><div><h2>Reliability</h2></div></header><div class="health-line"><span class="status-dot"></span><strong>${system.healthy ? 'All monitored systems healthy' : 'Attention required'}</strong></div><div class="health-line">Worker: ${state.operations.worker.healthy ? 'healthy' : 'stale'} · heartbeat ${escapeHtml(relativeTime(state.operations.worker.heartbeat_at))}</div><div class="health-line">Backup: ${state.operations.backup.verified_at ? `verified ${escapeHtml(relativeTime(state.operations.backup.verified_at))}` : 'not yet verified'}</div><div class="health-line">Sync: ${escapeHtml(system.synchronization)} · Backup: ${escapeHtml(system.backup)}</div></section>` : ''}
     </div>`;
   hydrateIcons($('#app-view'));
   $$('.theme-choice', $('#app-view')).forEach(button => button.addEventListener('click', () => savePreferences(button.dataset.themeChoice)));
@@ -3263,7 +3353,7 @@ function openBalanceAlertEditor(alert = null, availableChannels = []) {
       <label class="full">Alert name<input id="balance-alert-name" value="${escapeHtml(alert?.name || '')}" maxlength="160" placeholder="Checking balance is low" required></label>
       <label>Account<select id="balance-alert-account" required>${missingAccount}${accountOptions}</select></label>
       <label>Condition<select id="balance-alert-comparison"><option value="below" ${alert?.comparison !== 'above' ? 'selected' : ''}>Balance falls below</option><option value="above" ${alert?.comparison === 'above' ? 'selected' : ''}>Balance rises above</option></select></label>
-      <label>Amount<input id="balance-alert-threshold" inputmode="decimal" value="${escapeHtml(alert?.threshold || '')}" placeholder="100.00" required></label>
+      <label>Amount<input id="balance-alert-threshold" data-money-input inputmode="decimal" value="${escapeHtml(alert?.threshold || '')}" placeholder="100.00" required></label>
       <label><span><input id="balance-alert-enabled" type="checkbox" style="width:auto;min-height:auto" ${alert?.enabled !== false ? 'checked' : ''}> Alert is active</span></label>
       <fieldset class="account-toggle-group full"><legend>Send through</legend><div class="account-toggle-row">${channelMarkup}</div></fieldset>
       <p class="muted full">Mosaic sends once when the threshold is crossed and sends a recovery message when the balance returns to the other side.</p>
@@ -3276,8 +3366,12 @@ function openBalanceAlertEditor(alert = null, availableChannels = []) {
         const name = $('#balance-alert-name', root).value.trim();
         if (!name) { toast('Enter a name for this alert.', 'error'); return; }
         let threshold;
-        try { threshold = unitsToString(toUnits($('#balance-alert-threshold', root).value)); }
-        catch { toast('Enter a valid balance amount.', 'error'); return; }
+        const thresholdInput = $('#balance-alert-threshold', root);
+        try {
+          const formattedThreshold = moneyInput.read(thresholdInput);
+          if (!formattedThreshold) throw new Error('Amount is required.');
+          threshold = unitsToString(toUnits(formattedThreshold));
+        } catch { toast('Enter a valid balance amount.', 'error'); thresholdInput.focus(); return; }
         const channels = $$('.balance-alert-channel:checked', root).map(input => input.value);
         if (!channels.length) { toast('Choose at least one configured notification channel.', 'error'); return; }
         const enabled = $('#balance-alert-enabled', root).checked;
@@ -3334,7 +3428,7 @@ function openAccountCreator() {
     title: 'Add a manual account',
     body: `<form id="account-create-form" class="form-grid">
       <label class="full">Account name<input id="account-create-name" maxlength="255" placeholder="Cash Safe" autocomplete="off" required></label>
-      <label>Current balance<input id="account-starting-balance" inputmode="decimal" value="0.00" required></label>
+      <label>Current balance<input id="account-starting-balance" data-money-input inputmode="decimal" value="0.00" required></label>
       <label><span><input id="account-create-budget" type="checkbox" style="width:auto;min-height:auto" checked> Include in budget</span></label>
     </form>`,
     footer: '<button class="button modal-cancel" type="button">Cancel</button><button class="button button--primary create-account" type="submit" form="account-create-form">Add account</button>',
@@ -3344,7 +3438,7 @@ function openAccountCreator() {
         const name = $('#account-create-name', root).value.trim();
         if (!name) { toast('Enter an account name.', 'error'); $('#account-create-name', root).focus(); return; }
         let currentBalance;
-        try { currentBalance = unitsToString(toUnits($('#account-starting-balance', root).value)); }
+        try { currentBalance = unitsToString(toUnits(moneyInput.read($('#account-starting-balance', root)))); }
         catch { toast('Enter a valid current balance.', 'error'); $('#account-starting-balance', root).focus(); return; }
         const button = $('.create-account', root); setButtonBusy(button, true, 'Adding…');
         try {
@@ -3731,6 +3825,7 @@ async function enterApplication() {
 
 async function initialize() {
   hydrateIcons();
+  moneyInput.bind(document);
   installReorderDrag();
   $$('.nav-item').forEach(button => button.addEventListener('click', () => setView(button.dataset.view)));
   $('#brand-button').addEventListener('click', () => setView('budget'));

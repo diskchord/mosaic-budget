@@ -1,5 +1,5 @@
-const CACHE = 'mosaic-shell-v0.2.0-ui25';
-const SHELL = ['/', '/static/styles.css', '/static/app.js', '/static/icon.svg', '/static/manifest.webmanifest'];
+const CACHE = 'mosaic-shell-v0.2.0-ui28';
+const SHELL = ['/', '/static/styles.css', '/static/money-input.js', '/static/app.js', '/static/icon.svg', '/static/manifest.webmanifest'];
 
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting()));

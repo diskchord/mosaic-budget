@@ -19,9 +19,13 @@ test:
 
 verify:
 	python3 -m compileall -q backend/app backend/alembic backend/tests
+	node --check backend/app/static/money-input.js
 	node --check backend/app/static/app.js
 	node --check backend/app/static/sw.js
 	node --check scripts/capture-screenshots.js
+	node backend/tests_js/test_money_input.js
+	node backend/tests_js/test_assignment_feedback.js
+	node backend/tests_js/test_modal_focus.js
 	sh -n scripts/generate-secrets.sh ops/backups/backup.sh
 	python3 -c "import json, pathlib, xml.etree.ElementTree as ET; root = pathlib.Path('.'); json.loads((root / 'backend/app/static/manifest.webmanifest').read_text()); ET.parse(root / 'backend/app/static/icon.svg')"
 	cd backend && PYTHONPATH=.$${PYTHONPATH:+:$$PYTHONPATH} pytest
