@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed daily SimpleFIN date-range warnings and subsequent recovery emails by ending sync windows at the current time, keeping the default deep request within the 90-day limit
 - Added owner-created manual cash accounts, atomic paired transfers with balance-safe delete/restore behavior, and optional cash payees with a stable default
 - Moved the hidden-items notice below the full budget and added permanent month-forward section/category deletion that safely uncategorizes affected transactions and turns off dependent rules
 - Made single-category sorting the transaction editor default, with splitting available as a secondary action

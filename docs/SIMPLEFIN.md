@@ -55,6 +55,8 @@ Defaults:
 - pending transactions included
 - local rolling ceiling of 20 requests per 24 hours
 
+Both windows end at the current time, so the default deep request spans exactly 90 days. Pending transactions are included through `pending=1`; the end date is not extended into tomorrow, which would exceed the provider's 90-day range limit.
+
 Windows overlap intentionally. Idempotent source identities and content hashes make repeated observations safe.
 
 ## Errors

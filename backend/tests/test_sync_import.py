@@ -3,9 +3,10 @@ from __future__ import annotations
 import copy
 import hashlib
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select, update
 
@@ -23,11 +24,12 @@ from app.models import (
     SimpleFinConnection,
     SourceTransaction,
     SourceTransactionVersion,
+    SyncRun,
 )
 from app.security import encrypt_secret
 from app.services import sync as sync_service
 from app.services.budgets import serialize_transaction
-from app.utils import utcnow
+from app.utils import ensure_utc, utcnow
 
 
 def _reset_with_connection() -> SimpleFinConnection:
@@ -96,6 +98,53 @@ def _transaction(source_id: str, *, pending: bool, posted_offset_days: int = 0) 
         "description": "HANNAFORD",
         "extra": {"memo": "test"},
     }
+
+
+@pytest.mark.parametrize(
+    ("last_deep_hours_ago", "deep_days", "routine_days", "expected_mode", "expected_days"),
+    [
+        (None, 90, 7, "deep", 90),
+        (25, 90, 7, "deep", 90),
+        (3, 90, 7, "routine", 7),
+        (25, 30, 7, "deep", 30),
+        (3, 90, 30, "routine", 30),
+    ],
+)
+def test_sync_requests_configured_history_within_provider_date_limit(
+    monkeypatch, last_deep_hours_ago, deep_days, routine_days, expected_mode, expected_days
+) -> None:
+    connection = _reset_with_connection()
+    now = datetime(2026, 11, 1, 12, 34, 56, 789000, tzinfo=UTC)
+    monkeypatch.setattr(sync_service, "utcnow", lambda: now)
+    monkeypatch.setattr(sync_service.settings, "simplefin_deep_days", deep_days)
+    monkeypatch.setattr(sync_service.settings, "simplefin_routine_days", routine_days)
+    if last_deep_hours_ago is not None:
+        with SessionLocal() as db:
+            db.get(SimpleFinConnection, connection.id).last_deep_sync_at = now - timedelta(hours=last_deep_hours_ago)
+            db.commit()
+
+    requests = []
+
+    def fetch_accounts(access_url, *, start_epoch, end_epoch):
+        requests.append((start_epoch, end_epoch))
+        payload = _payload([])
+        if end_epoch - start_epoch > 90 * 86400:
+            payload["errlist"] = [{
+                "code": "gen.api",
+                "msg": "Requested date range exceeds limit of 90 days and was capped.",
+            }]
+        return payload
+
+    monkeypatch.setattr(sync_service, "fetch_account_set", fetch_accounts)
+
+    assert sync_service.perform_sync(connection.id)["status"] == "success"
+    assert requests == [(int((now - timedelta(days=expected_days)).timestamp()), int(now.timestamp()))]
+    with SessionLocal() as db:
+        run = db.scalar(select(SyncRun))
+        assert run.mode == expected_mode
+        assert int(ensure_utc(run.window_start).timestamp()) == requests[0][0]
+        assert int(ensure_utc(run.window_end).timestamp()) == requests[0][1]
+        assert db.scalar(select(func.count(NotificationIncident.id))) == 0
 
 
 def test_identical_payload_is_idempotent_and_tombstone_survives(monkeypatch) -> None:

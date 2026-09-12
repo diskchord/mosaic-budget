@@ -637,7 +637,9 @@ def perform_sync(connection_id: uuid.UUID) -> dict[str, int | str]:
         deep = connection.last_deep_sync_at is None or ensure_utc(connection.last_deep_sync_at) < now - timedelta(hours=24)
         days = settings.simplefin_deep_days if deep else settings.simplefin_routine_days
         window_start = now - timedelta(days=days)
-        window_end = now + timedelta(days=1)
+        # Adding a future day makes the default deep window exceed the 90-day
+        # provider limit. Pending transactions are requested via pending=1.
+        window_end = now
         run = SyncRun(
             simplefin_connection_id=connection.id,
             mode="deep" if deep else "routine",
