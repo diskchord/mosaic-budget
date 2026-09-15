@@ -2811,6 +2811,7 @@ function openTransferEditor() {
 function openManualTransaction() {
   const defaultAccount = state.budget?.accounts?.find(account => account.source_type === 'manual') || state.budget?.accounts?.[0];
   if (!defaultAccount) { toast('Create or sync an account before adding a transaction.', 'error'); return; }
+  const defaultCategory = state.view === 'transactions' ? state.transactionCategory : null;
   openModal({
     title: 'Add a cash or manual transaction',
     body: `<form id="manual-form" class="form-grid">
@@ -2819,7 +2820,7 @@ function openManualTransaction() {
       <label>Payee or source (optional)<input id="manual-payee" maxlength="500" placeholder="Cash transaction"></label>
       <label>Date<input id="manual-date" type="date" value="${defaultTransactionDate()}" required></label>
       <label>Account<select id="manual-account">${state.budget.accounts.map(account => `<option value="${account.id}" ${account.id === defaultAccount.id ? 'selected' : ''}>${escapeHtml(account.name)}</option>`).join('')}</select></label>
-      <label>Category<select id="manual-category"><option value="">Leave unassigned</option>${categoryOptions()}</select></label>
+      <label>Category<select id="manual-category"><option value="">Leave unassigned</option>${categoryOptions(defaultCategory)}</select></label>
       <label class="full">Note<textarea id="manual-note" maxlength="10000"></textarea></label>
     </form>`,
     footer: '<button class="button modal-cancel" type="button">Cancel</button><button class="button button--primary create-manual" type="submit" form="manual-form">Add transaction</button>',
